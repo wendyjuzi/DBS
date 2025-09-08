@@ -1,0 +1,21 @@
+{
+  "database": {
+    "name": "default_db",
+    "data_dir": "./data",
+    "page_size": 4096,
+    "buffer_pool_size": 100
+  },
+  "storage": {
+    "type": "file",
+    "file_path": "./data/database.db"
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "./logs/database.log"
+  },
+  "server": {
+    "host": "localhost",
+    "port": 8080,
+    "debug": false
+  }
+}
