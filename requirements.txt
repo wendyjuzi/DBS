@@ -1,0 +1,25 @@
+# 数据库系统依赖包
+# 核心依赖
+ply>=3.11
+click>=8.0.0
+
+# Web框架（可选）
+flask>=2.0.0
+fastapi>=0.68.0
+uvicorn>=0.15.0
+
+# 数据序列化
+msgpack>=1.0.0
+
+# 测试框架
+pytest>=6.0.0
+pytest-cov>=2.12.0
+
+# 开发工具
+black>=21.0.0
+flake8>=3.9.0
+mypy>=0.910
+
+# 文档生成
+sphinx>=4.0.0
+mkdocs>=1.2.0
