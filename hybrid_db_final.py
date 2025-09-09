@@ -32,6 +32,8 @@ class SimpleSQLParser:
                 return self._parse_insert(sql)
             elif sql_upper.startswith("SELECT"):
                 return self._parse_select(sql)
+            elif sql_upper.startswith("UPDATE"):
+                return self._parse_update(sql)
             elif sql_upper.startswith("DELETE"):
                 return self._parse_delete(sql)
             else:
@@ -121,25 +123,46 @@ class SimpleSQLParser:
         return parts
 
     def _parse_insert(self, sql: str) -> Dict[str, Any]:
-        """解析INSERT语句"""
-        pattern = r"INSERT\s+INTO\s+(\w+)\s+VALUES\s*\((.*)\)"
-        match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+        """解析INSERT语句，支持单条和批量插入"""
+        # 支持单条插入: INSERT INTO table VALUES (val1, val2, ...)
+        single_pattern = r"INSERT\s+INTO\s+(\w+)\s+VALUES\s*\((.*)\)"
+        single_match = re.match(single_pattern, sql, re.IGNORECASE | re.DOTALL)
         
-        if not match:
-            raise Exception("INSERT语句格式错误")
+        if single_match:
+            table_name = single_match.group(1)
+            values_str = single_match.group(2)
+            values = self._parse_value_list(values_str)
+            
+            if not values:
+                raise Exception("INSERT语句中缺少VALUES")
+            
+            return {
+                "type": "INSERT",
+                "table": table_name,
+                "values": [values]  # 包装成列表以支持批量
+            }
         
-        table_name = match.group(1)
-        values_str = match.group(2)
-        values = self._parse_value_list(values_str)
+        # 支持批量插入: INSERT INTO table VALUES (val1, val2), (val3, val4), ...
+        batch_pattern = r"INSERT\s+INTO\s+(\w+)\s+VALUES\s*(.*)"
+        batch_match = re.match(batch_pattern, sql, re.IGNORECASE | re.DOTALL)
         
-        if not values:
-            raise Exception("INSERT语句中缺少VALUES")
-
-        return {
-            "type": "INSERT",
-            "table": table_name,
-            "values": values
-        }
+        if batch_match:
+            table_name = batch_match.group(1)
+            values_str = batch_match.group(2)
+            
+            # 解析多个值组
+            values_list = self._parse_multiple_value_lists(values_str)
+            
+            if not values_list:
+                raise Exception("INSERT语句中缺少VALUES")
+            
+            return {
+                "type": "INSERT",
+                "table": table_name,
+                "values": values_list
+            }
+        
+        raise Exception("INSERT语句格式错误")
 
     def _parse_value_list(self, value_str: str) -> List[str]:
         """解析值列表"""
@@ -180,29 +203,104 @@ class SimpleSQLParser:
         
         return cleaned_values
 
+    def _parse_multiple_value_lists(self, values_str: str) -> List[List[str]]:
+        """解析多个值列表，支持批量插入"""
+        values_list = []
+        
+        # 手动解析括号组
+        i = 0
+        while i < len(values_str):
+            # 跳过空白字符
+            while i < len(values_str) and values_str[i].isspace():
+                i += 1
+            
+            if i >= len(values_str):
+                break
+                
+            # 找到左括号
+            if values_str[i] != '(':
+                i += 1
+                continue
+            
+            # 找到匹配的右括号
+            start = i + 1  # 跳过左括号
+            paren_count = 1
+            in_quotes = False
+            quote_char = None
+            i += 1
+            
+            while i < len(values_str) and paren_count > 0:
+                char = values_str[i]
+                
+                if char in ['"', "'"] and not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif char == quote_char and in_quotes:
+                    in_quotes = False
+                    quote_char = None
+                elif char == '(' and not in_quotes:
+                    paren_count += 1
+                elif char == ')' and not in_quotes:
+                    paren_count -= 1
+                
+                i += 1
+            
+            if paren_count == 0:
+                # 提取括号内的内容
+                group_content = values_str[start:i-1].strip()
+                if group_content:
+                    values = self._parse_value_list(group_content)
+                    values_list.append(values)
+        
+        return values_list
+
     def _parse_select(self, sql: str) -> Dict[str, Any]:
-        """解析SELECT语句"""
-        pattern = r"SELECT\s+(.*?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*))?"
-        match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+        """解析SELECT语句，支持复杂WHERE条件和ORDER BY"""
+        # 支持ORDER BY子句
+        order_by_pattern = r"SELECT\s+(.*?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*?))?(?:\s+ORDER\s+BY\s+(.*))?"
+        order_match = re.match(order_by_pattern, sql, re.IGNORECASE | re.DOTALL)
         
-        if not match:
-            raise Exception("SELECT语句格式错误")
+        if order_match:
+            columns_str = order_match.group(1).strip()
+            table_name = order_match.group(2)
+            where_clause = order_match.group(3)
+            order_by_clause = order_match.group(4)
+            
+            if columns_str == "*":
+                target_columns = ["*"]
+            else:
+                target_columns = [col.strip() for col in columns_str.split(",")]
+            
+            return {
+                "type": "SELECT",
+                "table": table_name,
+                "columns": target_columns,
+                "where": where_clause.strip() if where_clause else None,
+                "order_by": order_by_clause.strip() if order_by_clause else None
+            }
         
-        columns_str = match.group(1).strip()
-        table_name = match.group(2)
-        where_clause = match.group(3)
+        # 基本SELECT语句（向后兼容）
+        basic_pattern = r"SELECT\s+(.*?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*))?"
+        basic_match = re.match(basic_pattern, sql, re.IGNORECASE | re.DOTALL)
         
-        if columns_str == "*":
-            target_columns = ["*"]
-        else:
-            target_columns = [col.strip() for col in columns_str.split(",")]
+        if basic_match:
+            columns_str = basic_match.group(1).strip()
+            table_name = basic_match.group(2)
+            where_clause = basic_match.group(3)
+            
+            if columns_str == "*":
+                target_columns = ["*"]
+            else:
+                target_columns = [col.strip() for col in columns_str.split(",")]
+            
+            return {
+                "type": "SELECT",
+                "table": table_name,
+                "columns": target_columns,
+                "where": where_clause.strip() if where_clause else None
+            }
         
-        return {
-            "type": "SELECT",
-            "table": table_name,
-            "columns": target_columns,
-            "where": where_clause.strip() if where_clause else None
-        }
+        raise Exception("SELECT语句格式错误")
 
     def _parse_delete(self, sql: str) -> Dict[str, Any]:
         """解析DELETE语句"""
@@ -220,6 +318,82 @@ class SimpleSQLParser:
             "table": table_name,
             "where": where_clause.strip() if where_clause else None
         }
+
+    def _parse_update(self, sql: str) -> Dict[str, Any]:
+        """解析UPDATE语句"""
+        # 支持格式: UPDATE table SET col1=val1, col2=val2 WHERE condition
+        pattern = r"UPDATE\s+(\w+)\s+SET\s+(.*?)(?:\s+WHERE\s+(.*))?"
+        match = re.match(pattern, sql, re.IGNORECASE | re.DOTALL)
+        
+        if not match:
+            raise Exception("UPDATE语句格式错误")
+        
+        table_name = match.group(1)
+        set_clause = match.group(2)
+        where_clause = match.group(3)
+        
+        # 解析SET子句
+        updates = self._parse_set_clause(set_clause)
+        
+        return {
+            "type": "UPDATE",
+            "table": table_name,
+            "updates": updates,
+            "where": where_clause.strip() if where_clause else None
+        }
+
+    def _parse_set_clause(self, set_clause: str) -> Dict[str, str]:
+        """解析SET子句，返回列名到值的映射"""
+        updates = {}
+        
+        # 分割多个赋值语句
+        assignments = []
+        current_assignment = ""
+        paren_count = 0
+        in_quotes = False
+        quote_char = None
+        
+        for char in set_clause:
+            if char in ['"', "'"] and not in_quotes:
+                in_quotes = True
+                quote_char = char
+                current_assignment += char
+            elif char == quote_char and in_quotes:
+                in_quotes = False
+                quote_char = None
+                current_assignment += char
+            elif char == ',' and not in_quotes and paren_count == 0:
+                assignments.append(current_assignment.strip())
+                current_assignment = ""
+            else:
+                if char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+                current_assignment += char
+        
+        if current_assignment.strip():
+            assignments.append(current_assignment.strip())
+        
+        # 解析每个赋值语句
+        for assignment in assignments:
+            if '=' not in assignment:
+                raise Exception(f"无效的赋值语句: {assignment}")
+            
+            parts = assignment.split('=', 1)
+            if len(parts) != 2:
+                raise Exception(f"无效的赋值语句: {assignment}")
+            
+            column_name = parts[0].strip()
+            value = parts[1].strip()
+            
+            # 清理值（去除引号）
+            if (value.startswith("'") and value.endswith("'")) or (value.startswith('"') and value.endswith('"')):
+                value = value[1:-1]
+            
+            updates[column_name] = value
+        
+        return updates
 
 
 class HybridExecutionEngine:
@@ -243,6 +417,8 @@ class HybridExecutionEngine:
                 result = self._execute_insert(plan)
             elif plan_type == "SELECT":
                 result = self._execute_select(plan)
+            elif plan_type == "UPDATE":
+                result = self._execute_update(plan)
             elif plan_type == "DELETE":
                 result = self._execute_delete(plan)
             else:
@@ -293,29 +469,48 @@ class HybridExecutionEngine:
             raise Exception(f"表 '{table_name}' 已存在")
 
     def _execute_insert(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """执行INSERT计划"""
+        """执行INSERT计划，支持批量插入"""
         table_name = plan["table"]
-        values = plan["values"]
+        values_list = plan["values"]  # 现在是一个列表，支持批量插入
         
         if table_name not in self.table_columns:
             raise Exception(f"表 '{table_name}' 不存在")
         
         expected_cols = len(self.table_columns[table_name])
-        if len(values) != expected_cols:
-            raise Exception(f"列数不匹配，期望 {expected_cols} 列，实际 {len(values)} 列")
+        total_affected = 0
+        failed_inserts = []
         
-        success = self.executor.insert(table_name, values)
+        # 处理批量插入
+        for i, values in enumerate(values_list):
+            if len(values) != expected_cols:
+                failed_inserts.append(f"第{i+1}行: 列数不匹配，期望 {expected_cols} 列，实际 {len(values)} 列")
+                continue
+            
+            success = self.executor.insert(table_name, values)
+            if success:
+                total_affected += 1
+            else:
+                failed_inserts.append(f"第{i+1}行: 插入失败（行数据过大或存储空间不足）")
         
-        if success:
-            return {"affected_rows": 1}
-        else:
-            raise Exception("插入失败（行数据过大或存储空间不足）")
+        # 返回结果
+        if failed_inserts:
+            error_msg = f"批量插入部分失败: {'; '.join(failed_inserts)}"
+            if total_affected > 0:
+                return {
+                    "affected_rows": total_affected,
+                    "warnings": error_msg
+                }
+            else:
+                raise Exception(error_msg)
+        
+        return {"affected_rows": total_affected}
 
     def _execute_select(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """执行SELECT计划"""
+        """执行SELECT计划，支持ORDER BY排序"""
         table_name = plan["table"]
         target_columns = plan.get("columns", ["*"])
         where_clause = plan.get("where")
+        order_by_clause = plan.get("order_by")
         
         if table_name not in self.table_columns:
             raise Exception(f"表 '{table_name}' 不存在")
@@ -325,14 +520,104 @@ class HybridExecutionEngine:
         
         predicate = self._build_predicate(table_name, where_clause)
         
+        # 执行查询：SeqScan → Filter → Project
         scanned_rows = self.executor.seq_scan(table_name)
         filtered_rows = self.executor.filter(table_name, predicate)
         projected_data = self.executor.project(table_name, filtered_rows, target_columns)
+        
+        # 处理ORDER BY排序
+        if order_by_clause:
+            projected_data = self._apply_order_by(projected_data, order_by_clause, table_name)
         
         return {
             "data": projected_data,
             "affected_rows": len(projected_data),
             "metadata": {"columns": target_columns}
+        }
+
+    def _apply_order_by(self, data: List[List[str]], order_by_clause: str, table_name: str) -> List[List[str]]:
+        """应用ORDER BY排序"""
+        if not data:
+            return data
+        
+        # 解析ORDER BY子句
+        order_parts = order_by_clause.strip().split()
+        if len(order_parts) < 2:
+            raise Exception("ORDER BY子句格式错误")
+        
+        column_name = order_parts[0]
+        direction = order_parts[1].upper() if len(order_parts) > 1 else "ASC"
+        
+        if direction not in ["ASC", "DESC"]:
+            raise Exception("ORDER BY方向必须是ASC或DESC")
+        
+        # 获取列索引
+        col_names = self.table_columns.get(table_name, [])
+        try:
+            col_index = col_names.index(column_name)
+        except ValueError:
+            raise Exception(f"ORDER BY列 '{column_name}' 不存在")
+        
+        # 排序数据
+        def sort_key(row):
+            value = row[col_index]
+            # 尝试转换为数值进行排序
+            try:
+                if '.' in value:
+                    return float(value)
+                else:
+                    return int(value)
+            except ValueError:
+                return value  # 保持字符串排序
+        
+        sorted_data = sorted(data, key=sort_key, reverse=(direction == "DESC"))
+        return sorted_data
+
+    def _execute_update(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行UPDATE计划"""
+        table_name = plan["table"]
+        updates = plan["updates"]
+        where_clause = plan.get("where")
+        
+        if table_name not in self.table_columns:
+            raise Exception(f"表 '{table_name}' 不存在")
+        
+        col_names = self.table_columns[table_name]
+        
+        # 验证更新的列是否存在
+        for col_name in updates.keys():
+            if col_name not in col_names:
+                raise Exception(f"列 '{col_name}' 不存在")
+        
+        # 构建WHERE条件
+        predicate = self._build_predicate(table_name, where_clause)
+        
+        # 获取所有行
+        all_rows = self.executor.seq_scan(table_name)
+        updated_count = 0
+        
+        # 更新符合条件的行
+        for row in all_rows:
+            if predicate(row.get_values()):
+                # 创建新的行数据
+                new_values = list(row.get_values())
+                
+                # 应用更新
+                for col_name, new_value in updates.items():
+                    col_index = col_names.index(col_name)
+                    new_values[col_index] = new_value
+                
+                # 删除旧行（逻辑删除）
+                row.mark_deleted()
+                
+                # 插入新行
+                success = self.executor.insert(table_name, new_values)
+                if success:
+                    updated_count += 1
+        
+        return {
+            "affected_rows": updated_count,
+            "metadata": {"message": f"更新了 {updated_count} 行"}
         }
 
     def _execute_delete(self, plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -352,24 +637,66 @@ class HybridExecutionEngine:
         }
 
     def _build_predicate(self, table_name: str, where_clause: Optional[str]) -> Callable[[List[str]], bool]:
-        """将WHERE条件字符串转为C++可调用的过滤函数"""
+        """将WHERE条件字符串转为C++可调用的过滤函数，支持复杂条件"""
         if not where_clause:
             return lambda x: True
 
         col_names = self.table_columns.get(table_name, [])
-        processed_clause = where_clause
         
-        for col_idx, col_name in enumerate(col_names):
-            if col_name in processed_clause:
-                processed_clause = processed_clause.replace(f"{col_name} ", f"x[{col_idx}] ")
-                processed_clause = processed_clause.replace(f" {col_name}", f" x[{col_idx}]")
-                processed_clause = processed_clause.replace(f"'{col_name}'", f"x[{col_idx}]")
-
+        # 预处理WHERE子句，支持AND、OR、NOT等逻辑操作符
+        processed_clause = self._preprocess_where_clause(where_clause, col_names)
+        
         try:
             predicate = eval(f"lambda x: {processed_clause}")
             return predicate
         except Exception as e:
             raise Exception(f"WHERE条件解析错误: {str(e)}")
+
+    def _preprocess_where_clause(self, where_clause: str, col_names: List[str]) -> str:
+        """预处理WHERE子句，替换列名为索引引用"""
+        processed_clause = where_clause
+        
+        # 替换列名为索引引用
+        for col_idx, col_name in enumerate(col_names):
+            # 处理各种列名出现的情况
+            patterns = [
+                f"\\b{col_name}\\b",  # 单词边界
+                f"'{col_name}'",     # 单引号包围
+                f'"{col_name}"',     # 双引号包围
+            ]
+            
+            for pattern in patterns:
+                processed_clause = re.sub(pattern, f"x[{col_idx}]", processed_clause)
+        
+        # 处理字符串比较（添加引号）
+        processed_clause = self._process_string_comparisons(processed_clause)
+        
+        # 处理数值比较
+        processed_clause = self._process_numeric_comparisons(processed_clause)
+        
+        return processed_clause
+
+    def _process_string_comparisons(self, clause: str) -> str:
+        """处理字符串比较，确保字符串值被正确引用"""
+        # 匹配 = 'value' 或 = "value" 模式
+        string_pattern = r"=\s*([^=<>!'\"]+)(?=\s*(?:AND|OR|$))"
+        
+        def replace_string(match):
+            value = match.group(1).strip()
+            # 如果值不是数字且没有被引号包围，则添加单引号
+            if not (value.startswith("'") and value.endswith("'")) and \
+               not (value.startswith('"') and value.endswith('"')) and \
+               not value.replace('.', '').replace('-', '').isdigit():
+                return f"= '{value}'"
+            return match.group(0)
+        
+        return re.sub(string_pattern, replace_string, clause)
+
+    def _process_numeric_comparisons(self, clause: str) -> str:
+        """处理数值比较，确保数值被正确转换"""
+        # 这里可以添加更复杂的数值处理逻辑
+        # 目前保持简单实现
+        return clause
 
     def get_table_schema(self, table_name: str) -> Dict[str, Any]:
         """获取表结构"""
