@@ -25,6 +25,7 @@ class BufferPool:
         self.fs = fs
 
         # 缓存数据结构
+        # 使用 OrderedDict 实现 LRU
         self.cache: OrderedDict[Tuple[str, int], Page] = OrderedDict()
         self.dirty_pages: Dict[Tuple[str, int], bool] = {}
 
