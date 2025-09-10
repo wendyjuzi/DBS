@@ -7,8 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple
 
-from ..utils.constants import PAGE_SIZE, ROW_ACTIVE, ROW_DELETED
-
+from .constants import PAGE_SIZE, ROW_ACTIVE, ROW_DELETED, PAGE_HEADER_SIZE, SLOT_SIZE
 
 @dataclass
 class Slot:
@@ -16,12 +15,11 @@ class Slot:
     length: int
     flag: int = ROW_ACTIVE
 
-
 class Page:
     """简化页模型，页尾部保存槽目录(slotted page)。"""
 
-    HEADER_SIZE = 16  # [free_start(4)][slot_count(4)][free_space(4)][reserved(4)]
-    SLOT_SIZE = 9  # [offset(4)][length(4)][flag(1)]
+    HEADER_SIZE = PAGE_HEADER_SIZE
+    SLOT_SIZE = SLOT_SIZE
 
     def __init__(self, page_id: int, data: bytes | None = None):
         self.page_id = page_id
@@ -36,7 +34,6 @@ class Page:
     def _deserialize_header_and_slots(self) -> None:
         self.free_start = int.from_bytes(self._data[0:4], "little")
         slot_count = int.from_bytes(self._data[4:8], "little")
-        # free_space = int.from_bytes(self._data[8:12], "little")  # not strictly needed
         self.slots = []
         slots_start = PAGE_SIZE - slot_count * self.SLOT_SIZE
         i = 0
@@ -72,16 +69,26 @@ class Page:
     def has_space_for(self, length: int) -> bool:
         return self._free_space() >= length
 
+    # page.py 确保 insert_row 方法正确
     def insert_row(self, row_data: bytes) -> Tuple[int, int]:
         length = len(row_data)
         # ensure space for row and one more slot
         required = length + self.SLOT_SIZE
         if self._free_space() < required:
             raise ValueError("Not enough space in page")
+
         offset = self.free_start
-        self._data[offset:offset+length] = row_data
+        # 确保有足够的空间
+        if offset + length > len(self._data):
+            raise ValueError("Not enough space in page data array")
+
+        # 写入数据
+        self._data[offset:offset + length] = row_data
         self.free_start += length
+
+        # 添加槽
         self.slots.append(Slot(offset, length, ROW_ACTIVE))
+
         return (len(self.slots) - 1, offset)
 
     def iterate_rows(self):

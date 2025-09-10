@@ -8,9 +8,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from ..utils.constants import PAGE_SIZE
-from ..utils.helpers import ensure_dir
+from .constants import PAGE_SIZE
 
+def ensure_dir(path: str | Path) -> Path:
+    """确保目录存在"""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 class FileStorage:
     """最简单的基于单文件的分页存取。每个表一个数据文件。"""
