@@ -4,14 +4,16 @@
 执行计划生成器 (Logical Planner)
 
 - 输入: AST (语法树)
-- 输出: 执行计划 (JSON / 树结构)
-- 支持语句: CREATE TABLE, INSERT, SELECT, DELETE
+- 输出: 优化后的执行计划 (JSON / 树结构)
+- 支持语句: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE
+- 集成查询优化器进行计划优化
 """
 
 import json
+import sys
+import os
+from modules.sql_compiler.optimizer.query_optimizer import QueryOptimizer
 
-
-import json
 
 
 class PlanError(Exception):
@@ -41,25 +43,38 @@ class LogicalPlan:
 
 
 class Planner:
-    def __init__(self, ast_list):
+    def __init__(self, ast_list, enable_optimization=True):
         self.ast_list = ast_list
+        self.enable_optimization = enable_optimization
+        self.optimizer = QueryOptimizer() if self.enable_optimization else None
 
     def generate_plan(self):
         plans = []
         for ast in self.ast_list:
             stmt_type = ast["type"]
+            
+            # 生成初始逻辑计划
             if stmt_type == "CREATE_TABLE":
-                plans.append(self.plan_create(ast))
+                plan = self.plan_create(ast)
             elif stmt_type == "INSERT":
-                plans.append(self.plan_insert(ast))
+                plan = self.plan_insert(ast)
             elif stmt_type == "SELECT":
-                plans.append(self.plan_select(ast))
+                plan = self.plan_select(ast)
             elif stmt_type == "UPDATE":
-                plans.append(self.plan_update(ast))
+                plan = self.plan_update(ast)
             elif stmt_type == "DELETE":
-                plans.append(self.plan_delete(ast))
+                plan = self.plan_delete(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
+            
+            # 对 SELECT、UPDATE、DELETE 语句应用优化
+            if self.optimizer and stmt_type in ["SELECT", "UPDATE", "DELETE"]:
+                print(f"🔧 对 {stmt_type} 语句应用查询优化...")
+                optimized_plan = self.optimizer.optimize(plan)
+                plans.append(optimized_plan)
+            else:
+                plans.append(plan)
+                
         return plans
 
     def plan_create(self, ast):
