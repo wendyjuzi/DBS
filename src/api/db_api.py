@@ -29,8 +29,12 @@ class DatabaseAPI:
         self._storage = db_core.StorageEngine()  # type: ignore
         self._executor = db_core.ExecutionEngine(self._storage)  # type: ignore
 
-        # SQL 编译链路
-        self._parser = SimpleSQLParser()
+        # SQL 编译链路：优先使用 modules 版解析器，优化器暂沿用现有版本
+        try:
+            from modules.database_system.parser.simple_sql_parser import SimpleSQLParser as MSimpleSQLParser  # type: ignore
+            self._parser = MSimpleSQLParser()
+        except Exception:
+            self._parser = SimpleSQLParser()
         self._optimizer = QueryOptimizer(self._storage, getattr(self._storage, "get_catalog", lambda: None)())
         self._runner = HybridExecutionEngine(self._storage, self._executor)
         # 兼容对外访问：允许通过 db.runner 访问执行器
