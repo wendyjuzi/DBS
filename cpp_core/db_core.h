@@ -13,6 +13,7 @@
 #include <functional>
 #include <optional>
 #include <iostream>
+#include <tuple>
 
 namespace py = pybind11;
 
@@ -679,6 +680,63 @@ public:
             results.push_back(std::make_shared<Row>(vals));
         }
         return results;
+    }
+
+    // 9. Filter（条件下推，避免 Python 回调开销）
+    // conditions: 各元素为 (列索引, 操作符, 比较值)，AND 连接
+    std::vector<std::shared_ptr<Row>> filter_conditions(
+        const std::string& table_name,
+        const std::vector<std::tuple<int, std::string, std::string>>& conditions
+    ) {
+        auto all_rows = seq_scan(table_name);
+        if (conditions.empty()) return all_rows;
+
+        auto eval_cond = [](const std::string& lhs, const std::string& op, const std::string& rhs) -> bool {
+            auto to_num = [](const std::string& s, bool& ok) -> double {
+                try { ok = true; return std::stod(s); } catch (...) { ok = false; return 0.0; }
+            };
+            bool l_ok=false, r_ok=false; double lnum=to_num(lhs,l_ok), rnum=to_num(rhs,r_ok);
+            if (l_ok && r_ok) {
+                if (op == "=") return lnum == rnum;
+                if (op == ">") return lnum > rnum;
+                if (op == "<") return lnum < rnum;
+                if (op == ">=") return lnum >= rnum;
+                if (op == "<=") return lnum <= rnum;
+                if (op == "!=") return lnum != rnum;
+                return false;
+            }
+            if (op == "=") return lhs == rhs;
+            if (op == ">") return lhs > rhs;
+            if (op == "<") return lhs < rhs;
+            if (op == ">=") return lhs >= rhs;
+            if (op == "<=") return lhs <= rhs;
+            if (op == "!=") return lhs != rhs;
+            return false;
+        };
+
+        std::vector<std::shared_ptr<Row>> out;
+        out.reserve(all_rows.size());
+        for (const auto& row : all_rows) {
+            const auto& vals = row->get_values();
+            bool ok = true;
+            for (const auto& cond : conditions) {
+                int idx; std::string op; std::string rhs;
+                std::tie(idx, op, rhs) = cond;
+                if (idx < 0 || static_cast<size_t>(idx) >= vals.size()) { ok = false; break; }
+                if (!eval_cond(vals[static_cast<size_t>(idx)], op, rhs)) { ok = false; break; }
+            }
+            if (ok) out.push_back(row);
+        }
+        return out;
+    }
+
+    // 10. 批量插入（简单循环封装）
+    size_t insert_many(const std::string& table_name, const std::vector<std::vector<std::string>>& rows) {
+        size_t ok_count = 0;
+        for (const auto& r : rows) {
+            if (insert(table_name, r)) ok_count++;
+        }
+        return ok_count;
     }
 };
 

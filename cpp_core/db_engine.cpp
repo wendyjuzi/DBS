@@ -58,5 +58,10 @@ PYBIND11_MODULE(db_core, m) {
         .def("index_scan", &ExecutionEngine::index_scan, 
              py::arg("table_name"), py::arg("pk_value"))
         .def("index_range_scan", &ExecutionEngine::index_range_scan, 
-             py::arg("table_name"), py::arg("min_pk"), py::arg("max_pk"));
+             py::arg("table_name"), py::arg("min_pk"), py::arg("max_pk"))
+        // 额外接口：下推过滤与批量插入（合并到同一个定义链，避免重复定义类）
+        .def("filter_conditions", &ExecutionEngine::filter_conditions,
+             py::arg("table_name"), py::arg("conditions"))
+        .def("insert_many", &ExecutionEngine::insert_many,
+             py::arg("table_name"), py::arg("rows"));
 }
