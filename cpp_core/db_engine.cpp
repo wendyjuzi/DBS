@@ -29,7 +29,10 @@ PYBIND11_MODULE(db_core, m) {
     // 4. 绑定StorageEngine类
     py::class_<StorageEngine>(m, "StorageEngine")
         .def(py::init<>())
-        .def("flush_all_dirty_pages", &StorageEngine::flush_all_dirty_pages);
+        .def("flush_all_dirty_pages", &StorageEngine::flush_all_dirty_pages)
+        .def("has_index", &StorageEngine::has_index)
+        .def("get_table_columns", &StorageEngine::get_table_columns)
+        .def("get_index_size", &StorageEngine::get_index_size);
 
     // 5. 绑定ExecutionEngine类（核心接口）
     py::class_<ExecutionEngine>(m, "ExecutionEngine")
@@ -50,5 +53,10 @@ PYBIND11_MODULE(db_core, m) {
              py::arg("table_name"), py::arg("input_rows"), py::arg("target_columns"))
         // Delete：返回删除行数
         .def("delete_rows", &ExecutionEngine::delete_rows, 
-             py::arg("table_name"), py::arg("predicate"));
+             py::arg("table_name"), py::arg("predicate"))
+        // Index 接口（简化版）
+        .def("index_scan", &ExecutionEngine::index_scan, 
+             py::arg("table_name"), py::arg("pk_value"))
+        .def("index_range_scan", &ExecutionEngine::index_range_scan, 
+             py::arg("table_name"), py::arg("min_pk"), py::arg("max_pk"));
 }
