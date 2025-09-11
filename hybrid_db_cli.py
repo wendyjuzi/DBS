@@ -30,6 +30,7 @@ class HybridDatabaseCLI:
             print("=== 混合架构数据库系统 (SQL编译器 + C++执行引擎) ===")
             print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE")
             print("输入 'exit' 退出, 'help' 查看帮助, 'tables' 显示所有表")
+            print("输入 'cache' 查看缓存统计, 'flushcache' 刷新缓存到磁盘")
             print("注意: 适配 modules/sql_compiler 的语法限制\n")
         except Exception as e:
             print(f"数据库初始化失败: {str(e)}")
@@ -71,6 +72,14 @@ class HybridDatabaseCLI:
                     
                     if line.lower() == "flush":
                         self._flush_database()
+                        break
+                    
+                    if line.lower() == "cache":
+                        self._show_cache()
+                        break
+
+                    if line.lower() == "flushcache":
+                        self._flush_cache()
                         break
                     
                     # 收集SQL行
@@ -187,11 +196,13 @@ class HybridDatabaseCLI:
 📖 混合架构数据库系统帮助
 
 🔧 系统命令:
-  help     - 显示此帮助信息
-  tables   - 显示所有表
-  clear    - 清屏
-  flush    - 刷盘数据到磁盘
-  exit     - 退出程序
+  help       - 显示此帮助信息
+  tables     - 显示所有表
+  clear      - 清屏
+  flush      - 刷盘数据到磁盘
+  cache      - 显示缓存统计
+  flushcache - 刷新缓存并刷盘
+  exit       - 退出程序
 
 📝 SQL语句支持:
   CREATE TABLE table_name (col1 type1, col2 type2, ...)  - 创建表
@@ -307,6 +318,25 @@ class HybridDatabaseCLI:
             print("✓ 数据已保存")
         except Exception as e:
             print(f"⚠  保存数据时出错: {str(e)}")
+
+    def _show_cache(self):
+        """显示缓存统计信息"""
+        try:
+            stats = self.adapter.get_cache_stats()
+            print("缓存统计:")
+            print(f"  Python缓存: {stats.get('python_cache', {})}")
+            print(f"  混合统计: {stats.get('hybrid_stats', {})}")
+            print(f"  C++加速: {stats.get('cpp_enabled', False)}")
+        except Exception as e:
+            print(f" 获取缓存统计失败: {str(e)}")
+
+    def _flush_cache(self):
+        """刷新缓存到磁盘"""
+        try:
+            self.adapter.flush_cache()
+            print("✓ 缓存已刷新并刷盘")
+        except Exception as e:
+            print(f" 刷新缓存失败: {str(e)}")
 
 
 def main():

@@ -19,25 +19,64 @@ from modules.sql_compiler.planner.planner import Planner
 from src.core.executor.hybrid_executor import HybridExecutionEngine
 from src.utils.exceptions import ExecutionError, SQLSyntaxError
 
+# 导入混合存储引擎
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from hybrid_storage_engine import HybridStorageEngine
+
 
 class SQLCompilerAdapter:
     """SQL编译器适配器 - 不修改编译器，只做格式转换"""
     
-    def __init__(self):
+    def __init__(self, use_hybrid_storage: bool = True, cache_capacity: int = 100, cache_strategy: str = "LRU"):
         # 初始化SQL编译器组件
         self.catalog = Catalog()
         self.semantic_analyzer = SemanticAnalyzer(self.catalog)
         
-        # 初始化C++执行引擎
-        try:
-            import db_core
-            self.storage_engine = db_core.StorageEngine()
-            self.execution_engine = db_core.ExecutionEngine(self.storage_engine)
-            self.hybrid_executor = HybridExecutionEngine(self.storage_engine, self.execution_engine)
-            print("[ADAPTER] C++执行引擎初始化成功")
-        except ImportError as e:
-            print(f"[ADAPTER] C++执行引擎初始化失败: {e}")
-            raise ExecutionError("C++执行引擎不可用")
+        # 初始化存储引擎
+        if use_hybrid_storage:
+            try:
+                # 使用混合存储引擎（集成OS存储缓存系统）
+                self.hybrid_storage = HybridStorageEngine(
+                    cache_capacity=cache_capacity,
+                    cache_strategy=cache_strategy,
+                    enable_cpp_acceleration=True
+                )
+                print("[ADAPTER] 混合存储引擎初始化成功")
+                
+                # 为了兼容现有接口，创建传统的执行引擎
+                import db_core
+                self.storage_engine = db_core.StorageEngine()
+                self.execution_engine = db_core.ExecutionEngine(self.storage_engine)
+                self.hybrid_executor = HybridExecutionEngine(self.storage_engine, self.execution_engine)
+                print("[ADAPTER] C++执行引擎初始化成功")
+                
+            except Exception as e:
+                print(f"[ADAPTER] 混合存储引擎初始化失败: {e}")
+                # 回退到传统C++引擎
+                try:
+                    import db_core
+                    self.storage_engine = db_core.StorageEngine()
+                    self.execution_engine = db_core.ExecutionEngine(self.storage_engine)
+                    self.hybrid_executor = HybridExecutionEngine(self.storage_engine, self.execution_engine)
+                    self.hybrid_storage = None
+                    print("[ADAPTER] 回退到传统C++执行引擎")
+                except ImportError as e:
+                    print(f"[ADAPTER] C++执行引擎初始化失败: {e}")
+                    raise ExecutionError("C++执行引擎不可用")
+        else:
+            # 使用传统C++引擎
+            try:
+                import db_core
+                self.storage_engine = db_core.StorageEngine()
+                self.execution_engine = db_core.ExecutionEngine(self.storage_engine)
+                self.hybrid_executor = HybridExecutionEngine(self.storage_engine, self.execution_engine)
+                self.hybrid_storage = None
+                print("[ADAPTER] C++执行引擎初始化成功")
+            except ImportError as e:
+                print(f"[ADAPTER] C++执行引擎初始化失败: {e}")
+                raise ExecutionError("C++执行引擎不可用")
     
     def _convert_plan_to_executor_format(self, compiler_plan) -> Dict[str, Any]:
         """
@@ -306,11 +345,31 @@ class SQLCompilerAdapter:
         except Exception as e:
             print(f"[ADAPTER] 获取目录信息失败: {e}")
             return {}
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        if self.hybrid_storage:
+            return self.hybrid_storage.get_cache_stats()
+        else:
+            return {"message": "混合存储引擎未启用"}
+    
+    def flush_cache(self):
+        """刷盘缓存"""
+        if self.hybrid_storage:
+            self.hybrid_storage.flush_all_dirty_pages()
+        else:
+            self.storage_engine.flush_all_dirty_pages()
 
 
-def create_sql_compiler_adapter() -> SQLCompilerAdapter:
+def create_sql_compiler_adapter(use_hybrid_storage: bool = True, 
+                               cache_capacity: int = 100, 
+                               cache_strategy: str = "LRU") -> SQLCompilerAdapter:
     """创建SQL编译器适配器实例"""
-    return SQLCompilerAdapter()
+    return SQLCompilerAdapter(
+        use_hybrid_storage=use_hybrid_storage,
+        cache_capacity=cache_capacity,
+        cache_strategy=cache_strategy
+    )
 
 
 if __name__ == "__main__":
