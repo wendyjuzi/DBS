@@ -100,7 +100,7 @@ class Lexer:
             if self.peek() == '=':
                 char += self.advance()
             self.add_token("OPERATOR", char, self.line, start_col)
-        elif char in "(),;.":
+        elif char in "(),;.*":
             self.add_token("DELIMITER", char, self.line, start_col)
         else:
             self.add_error(ERROR_TYPES["UNKNOWN_SYMBOL"], char, self.line, start_col)

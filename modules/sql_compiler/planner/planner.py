@@ -64,6 +64,8 @@ class Planner:
                 plan = self.plan_update(ast)
             elif stmt_type == "DELETE":
                 plan = self.plan_delete(ast)
+            elif stmt_type == "DROP_TABLE":
+                plan = self.plan_drop(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             

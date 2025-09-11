@@ -59,6 +59,8 @@ class HybridExecutionEngine:
                 res = self._execute_update(plan)
             elif t in ["DELETE", "Delete"]:
                 res = self._execute_delete(plan)
+            elif t in ["DROP_TABLE", "DropTable"]:
+                res = self._execute_drop_table(plan)
             else:
                 raise ExecutionError(f"不支持的查询计划类型: {t}")
             res["execution_time"] = time.time() - start_time
@@ -418,3 +420,34 @@ class HybridExecutionEngine:
             "data": data,
             "metadata": {"message": f"分组聚合返回 {len(data)} 组"}
         }
+
+    def _execute_drop_table(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行DROP TABLE操作"""
+        # 支持两种计划格式：原始格式和SQL编译器格式
+        if "props" in plan:
+            # SQL编译器格式
+            table_name = plan["props"]["table"]
+        else:
+            # 原始格式
+            table_name = plan["table"]
+        
+        print(f"[EXEC] DROP TABLE {table_name}")
+        
+        # 检查表是否存在
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        
+        # 调用C++ DROP TABLE算子
+        success = self.executor.drop_table(table_name)
+        
+        if success:
+            # 清理本地缓存
+            if table_name in self.table_columns:
+                del self.table_columns[table_name]
+            
+            return {
+                "affected_rows": 0,
+                "metadata": {"message": f"表 '{table_name}' 删除成功"}
+            }
+        else:
+            raise ExecutionError(f"表 '{table_name}' 不存在或删除失败")

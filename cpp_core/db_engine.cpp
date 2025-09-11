@@ -72,7 +72,9 @@ PYBIND11_MODULE(db_core, m) {
         .def("order_by", &ExecutionEngine::order_by,
              py::arg("table_name"), py::arg("order_clauses"))
         .def("group_by", &ExecutionEngine::group_by,
-             py::arg("table_name"), py::arg("group_columns"), py::arg("agg_functions"));
+             py::arg("table_name"), py::arg("group_columns"), py::arg("agg_functions"))
+        // DROP TABLE功能
+        .def("drop_table", &ExecutionEngine::drop_table, py::arg("table_name"));
 
     // 绑定GroupByResult结构体
     py::class_<ExecutionEngine::GroupByResult>(m, "GroupByResult")
