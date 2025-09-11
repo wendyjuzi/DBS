@@ -63,5 +63,19 @@ PYBIND11_MODULE(db_core, m) {
         .def("filter_conditions", &ExecutionEngine::filter_conditions,
              py::arg("table_name"), py::arg("conditions"))
         .def("insert_many", &ExecutionEngine::insert_many,
-             py::arg("table_name"), py::arg("rows"));
+             py::arg("table_name"), py::arg("rows"))
+        // 新增功能：UPDATE、JOIN、ORDER BY、GROUP BY
+        .def("update_rows", &ExecutionEngine::update_rows,
+             py::arg("table_name"), py::arg("set_clauses"), py::arg("where_predicate"))
+        .def("inner_join", &ExecutionEngine::inner_join,
+             py::arg("left_table"), py::arg("right_table"), py::arg("left_col"), py::arg("right_col"))
+        .def("order_by", &ExecutionEngine::order_by,
+             py::arg("table_name"), py::arg("order_clauses"))
+        .def("group_by", &ExecutionEngine::group_by,
+             py::arg("table_name"), py::arg("group_columns"), py::arg("agg_functions"));
+
+    // 绑定GroupByResult结构体
+    py::class_<ExecutionEngine::GroupByResult>(m, "GroupByResult")
+        .def_readonly("group_keys", &ExecutionEngine::GroupByResult::group_keys)
+        .def_readonly("aggregates", &ExecutionEngine::GroupByResult::aggregates);
 }

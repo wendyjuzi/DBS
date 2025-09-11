@@ -738,6 +738,296 @@ public:
         }
         return ok_count;
     }
+
+    // 11. UPDATE算子：更新满足条件的行
+    size_t update_rows(
+        const std::string& table_name,
+        const std::vector<std::pair<std::string, std::string>>& set_clauses,  // 列名->新值
+        const std::function<bool(const std::vector<std::string>&)>& where_predicate
+    ) {
+        size_t updated_count = 0;
+        auto schema_opt = storage.get_catalog().get_table_schema(table_name);
+        if (!schema_opt) return 0;
+
+        // 获取列索引映射
+        std::map<std::string, size_t> col_name_to_idx;
+        for (size_t i = 0; i < schema_opt->columns.size(); ++i) {
+            col_name_to_idx[schema_opt->columns[i].name] = i;
+        }
+
+        // 遍历所有页，更新符合条件的行
+        size_t max_page_id = storage.get_table_max_page_id(table_name);
+        for (size_t page_id = 1; page_id <= max_page_id; page_id++) {
+            auto page = storage.get_page(table_name, page_id);
+            if (!page) continue;
+
+            auto page_rows = page->get_rows();
+            for (const auto& row : page_rows) {
+                if (where_predicate(row->get_values()) && !row->get_is_deleted()) {
+                    // 创建新行数据
+                    auto new_values = row->get_values();
+                    bool has_update = false;
+                    
+                    // 应用SET子句
+                    for (const auto& set_clause : set_clauses) {
+                        const std::string& col_name = set_clause.first;
+                        const std::string& new_value = set_clause.second;
+                        
+                        auto it = col_name_to_idx.find(col_name);
+                        if (it != col_name_to_idx.end()) {
+                            new_values[it->second] = new_value;
+                            has_update = true;
+                        }
+                    }
+                    
+                    if (has_update) {
+                        // 删除旧行，插入新行
+                        row->mark_deleted();
+                        Row new_row(new_values);
+                        if (page->insert_row(new_row)) {
+                            // 更新主键索引
+                            storage.insert_index_row(table_name, new_values);
+                            updated_count++;
+                        }
+                        page->set_dirty(true);
+                    }
+                }
+            }
+            
+            storage.write_page(table_name, page);
+        }
+        
+        return updated_count;
+    }
+
+    // 12. JOIN算子：内连接两个表
+    std::vector<std::vector<std::string>> inner_join(
+        const std::string& left_table,
+        const std::string& right_table,
+        const std::string& left_col,
+        const std::string& right_col
+    ) {
+        std::vector<std::vector<std::string>> result;
+        
+        // 获取表结构
+        auto left_schema = storage.get_catalog().get_table_schema(left_table);
+        auto right_schema = storage.get_catalog().get_table_schema(right_table);
+        if (!left_schema || !right_schema) return result;
+
+        // 获取连接列索引
+        auto left_col_idx = storage.get_catalog().get_column_index(left_table, left_col);
+        auto right_col_idx = storage.get_catalog().get_column_index(right_table, right_col);
+        if (!left_col_idx || !right_col_idx) return result;
+
+        // 扫描左表
+        auto left_rows = seq_scan(left_table);
+        
+        // 为右表建立哈希索引（简化实现）
+        std::map<std::string, std::vector<std::shared_ptr<Row>>> right_index;
+        auto right_rows = seq_scan(right_table);
+        for (const auto& right_row : right_rows) {
+            const auto& vals = right_row->get_values();
+            if (*right_col_idx < vals.size()) {
+                right_index[vals[*right_col_idx]].push_back(right_row);
+            }
+        }
+
+        // 执行连接
+        for (const auto& left_row : left_rows) {
+            const auto& left_vals = left_row->get_values();
+            if (*left_col_idx < left_vals.size()) {
+                const std::string& join_key = left_vals[*left_col_idx];
+                auto it = right_index.find(join_key);
+                if (it != right_index.end()) {
+                    // 找到匹配，生成连接结果
+                    for (const auto& right_row : it->second) {
+                        std::vector<std::string> joined_row;
+                        // 左表所有列
+                        joined_row.insert(joined_row.end(), left_vals.begin(), left_vals.end());
+                        // 右表所有列
+                        const auto& right_vals = right_row->get_values();
+                        joined_row.insert(joined_row.end(), right_vals.begin(), right_vals.end());
+                        result.push_back(joined_row);
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    // 13. ORDER BY算子：按指定列排序
+    std::vector<std::shared_ptr<Row>> order_by(
+        const std::string& table_name,
+        const std::vector<std::pair<std::string, bool>>& order_clauses  // 列名, ASC(true)/DESC(false)
+    ) {
+        auto rows = seq_scan(table_name);
+        if (order_clauses.empty()) return rows;
+
+        // 获取列索引
+        std::vector<std::pair<size_t, bool>> order_indices;  // 列索引, 升序标志
+        for (const auto& clause : order_clauses) {
+            auto col_idx = storage.get_catalog().get_column_index(table_name, clause.first);
+            if (col_idx) {
+                order_indices.push_back({*col_idx, clause.second});
+            }
+        }
+        if (order_indices.empty()) return rows;
+
+        // 排序比较函数
+        auto compare_rows = [&order_indices](const std::shared_ptr<Row>& a, const std::shared_ptr<Row>& b) -> bool {
+            const auto& vals_a = a->get_values();
+            const auto& vals_b = b->get_values();
+            
+            for (const auto& order_idx : order_indices) {
+                size_t col_idx = order_idx.first;
+                bool ascending = order_idx.second;
+                
+                if (col_idx >= vals_a.size() || col_idx >= vals_b.size()) continue;
+                
+                const std::string& val_a = vals_a[col_idx];
+                const std::string& val_b = vals_b[col_idx];
+                
+                // 尝试数值比较
+                bool a_is_num = false, b_is_num = false;
+                double num_a = 0.0, num_b = 0.0;
+                try {
+                    num_a = std::stod(val_a);
+                    a_is_num = true;
+                } catch (...) {}
+                try {
+                    num_b = std::stod(val_b);
+                    b_is_num = true;
+                } catch (...) {}
+                
+                if (a_is_num && b_is_num) {
+                    if (num_a != num_b) {
+                        return ascending ? (num_a < num_b) : (num_a > num_b);
+                    }
+                } else {
+                    if (val_a != val_b) {
+                        return ascending ? (val_a < val_b) : (val_a > val_b);
+                    }
+                }
+            }
+            return false;  // 相等
+        };
+
+        std::sort(rows.begin(), rows.end(), compare_rows);
+        return rows;
+    }
+
+    // 14. GROUP BY算子：分组聚合
+    struct GroupByResult {
+        std::vector<std::string> group_keys;  // 分组键值
+        std::map<std::string, double> aggregates;  // 聚合结果：函数名->值
+    };
+
+    std::vector<GroupByResult> group_by(
+        const std::string& table_name,
+        const std::vector<std::string>& group_columns,
+        const std::vector<std::pair<std::string, std::string>>& agg_functions  // 列名, 函数名(COUNT/SUM/AVG/MAX/MIN)
+    ) {
+        std::vector<GroupByResult> result;
+        auto rows = seq_scan(table_name);
+        if (rows.empty()) return result;
+
+        // 获取分组列索引
+        std::vector<size_t> group_indices;
+        for (const auto& col_name : group_columns) {
+            auto col_idx = storage.get_catalog().get_column_index(table_name, col_name);
+            if (col_idx) {
+                group_indices.push_back(*col_idx);
+            }
+        }
+
+        // 获取聚合列索引
+        std::vector<std::pair<size_t, std::string>> agg_indices;  // 列索引, 函数名
+        for (const auto& agg : agg_functions) {
+            auto col_idx = storage.get_catalog().get_column_index(table_name, agg.first);
+            if (col_idx) {
+                agg_indices.push_back({*col_idx, agg.second});
+            }
+        }
+
+        // 分组聚合
+        std::map<std::string, std::vector<std::shared_ptr<Row>>> groups;
+        
+        for (const auto& row : rows) {
+            const auto& vals = row->get_values();
+            
+            // 构建分组键
+            std::string group_key;
+            for (size_t i = 0; i < group_indices.size(); ++i) {
+                if (i > 0) group_key += "|";
+                if (group_indices[i] < vals.size()) {
+                    group_key += vals[group_indices[i]];
+                }
+            }
+            
+            groups[group_key].push_back(row);
+        }
+
+        // 计算每个组的聚合值
+        for (const auto& group : groups) {
+            GroupByResult group_result;
+            group_result.group_keys = group_columns;
+            
+            // 设置分组键值
+            std::vector<std::string> key_parts;
+            size_t pos = 0;
+            for (size_t i = 0; i < group_columns.size(); ++i) {
+                size_t next_pos = group.first.find('|', pos);
+                if (next_pos == std::string::npos) next_pos = group.first.length();
+                key_parts.push_back(group.first.substr(pos, next_pos - pos));
+                pos = next_pos + 1;
+            }
+            group_result.group_keys = key_parts;
+
+            // 计算聚合函数
+            for (const auto& agg_idx : agg_indices) {
+                size_t col_idx = agg_idx.first;
+                const std::string& func_name = agg_idx.second;
+                
+                if (func_name == "COUNT") {
+                    group_result.aggregates[func_name] = static_cast<double>(group.second.size());
+                } else {
+                    // 数值聚合
+                    std::vector<double> values;
+                    for (const auto& row : group.second) {
+                        const auto& vals = row->get_values();
+                        if (col_idx < vals.size()) {
+                            try {
+                                values.push_back(std::stod(vals[col_idx]));
+                            } catch (...) {
+                                // 忽略非数值
+                            }
+                        }
+                    }
+                    
+                    if (!values.empty()) {
+                        if (func_name == "SUM") {
+                            double sum = 0.0;
+                            for (double v : values) sum += v;
+                            group_result.aggregates[func_name] = sum;
+                        } else if (func_name == "AVG") {
+                            double sum = 0.0;
+                            for (double v : values) sum += v;
+                            group_result.aggregates[func_name] = sum / values.size();
+                        } else if (func_name == "MAX") {
+                            group_result.aggregates[func_name] = *std::max_element(values.begin(), values.end());
+                        } else if (func_name == "MIN") {
+                            group_result.aggregates[func_name] = *std::min_element(values.begin(), values.end());
+                        }
+                    }
+                }
+            }
+            
+            result.push_back(group_result);
+        }
+        
+        return result;
+    }
 };
 
 #endif // DB_CORE_H

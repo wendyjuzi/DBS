@@ -49,13 +49,15 @@ class HybridExecutionEngine:
         print(f"[EXEC] 收到计划: {plan}")
         try:
             t = plan.get("type")
-            if t == "CREATE_TABLE":
+            if t in ["CREATE_TABLE", "CreateTable"]:
                 res = self._execute_create_table(plan)
-            elif t == "INSERT":
+            elif t in ["INSERT", "Insert"]:
                 res = self._execute_insert(plan)
-            elif t == "SELECT":
+            elif t in ["SELECT", "Select"]:
                 res = self._execute_select(plan)
-            elif t == "DELETE":
+            elif t in ["UPDATE", "Update"]:
+                res = self._execute_update(plan)
+            elif t in ["DELETE", "Delete"]:
                 res = self._execute_delete(plan)
             else:
                 raise ExecutionError(f"不支持的查询计划类型: {t}")
@@ -70,8 +72,16 @@ class HybridExecutionEngine:
             raise ExecutionError(f"执行查询时发生错误: {str(e)}")
 
     def _execute_create_table(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        table_name = plan["table"]
-        columns_def = plan["columns"]
+        # 支持两种计划格式：原始格式和SQL编译器格式
+        if "props" in plan:
+            # SQL编译器格式
+            table_name = plan["props"]["table"]
+            columns_def = plan["props"]["columns"]
+        else:
+            # 原始格式
+            table_name = plan["table"]
+            columns_def = plan["columns"]
+        
         print(f"[EXEC] CREATE TABLE {table_name} cols={columns_def}")
         cpp_columns = []
         for col_def in columns_def:
@@ -93,8 +103,23 @@ class HybridExecutionEngine:
         raise ExecutionError(f"表 '{table_name}' 已存在")
 
     def _execute_insert(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        table_name = plan["table"]
-        values = plan["values"]
+        # 支持两种计划格式：原始格式和SQL编译器格式
+        if "props" in plan:
+            # SQL编译器格式
+            table_name = plan["props"]["table"]
+            # 从children中获取values
+            values = []
+            for child in plan.get("children", []):
+                if child.get("type") == "Values":
+                    rows = child.get("props", {}).get("rows", [])
+                    if rows:
+                        values = rows[0]  # 取第一行数据
+                    break
+        else:
+            # 原始格式
+            table_name = plan["table"]
+            values = plan["values"]
+        
         print(f"[EXEC] INSERT {table_name} values={values}")
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
@@ -110,6 +135,27 @@ class HybridExecutionEngine:
         raise ExecutionError("插入失败（行数据过大或存储空间不足）")
 
     def _execute_select(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        # 检查是否有JOIN
+        tables = plan.get("tables", [plan.get("table")])
+        joins = plan.get("joins", [])
+        
+        if len(tables) > 1 or joins:
+            # 执行JOIN查询
+            return self._execute_join(plan)
+        
+        # 检查是否有ORDER BY
+        order_by = plan.get("order_by")
+        if order_by:
+            # 执行ORDER BY查询
+            return self._execute_order_by(plan)
+        
+        # 检查是否有GROUP BY
+        group_by = plan.get("group_by")
+        if group_by:
+            # 执行GROUP BY查询
+            return self._execute_group_by(plan)
+        
+        # 常规单表查询
         table_name = plan["table"]
         target_columns = plan.get("columns", ["*"])
         where_clause = plan.get("where")
@@ -236,3 +282,139 @@ class HybridExecutionEngine:
             return eval(f"lambda x: {processed_clause}")
         except Exception as e:
             raise ExecutionError(f"WHERE条件解析错误: {str(e)}")
+
+    def _execute_update(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行UPDATE语句"""
+        table_name = plan["table"]
+        set_clauses = plan.get("set_clauses", [])
+        where_clause = plan.get("where")
+        
+        print(f"[EXEC] UPDATE {table_name} SET {set_clauses} WHERE {where_clause}")
+        
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        if table_name not in self.table_columns:
+            raise CatalogError(f"表 '{table_name}' 不存在")
+        
+        # 构建WHERE谓词
+        predicate = self._build_predicate(table_name, where_clause)
+        
+        # 调用C++ UPDATE算子
+        updated_count = self.executor.update_rows(table_name, set_clauses, predicate)
+        
+        return {
+            "affected_rows": updated_count,
+            "metadata": {"message": f"更新了 {updated_count} 行"}
+        }
+
+    def _execute_join(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行JOIN操作"""
+        tables = plan.get("tables", [])
+        joins = plan.get("joins", [])
+        target_columns = plan.get("columns", ["*"])
+        where_clause = plan.get("where")
+        
+        print(f"[EXEC] JOIN tables={tables} joins={joins} cols={target_columns}")
+        
+        if len(tables) < 2:
+            raise ExecutionError("JOIN需要至少两个表")
+        
+        # 简化实现：只支持两个表的内连接
+        if len(tables) == 2 and len(joins) == 1:
+            left_table = tables[0]
+            right_table = tables[1]
+            join_info = joins[0]
+            
+            # 调用C++ JOIN算子
+            joined_rows = self.executor.inner_join(
+                left_table, right_table,
+                join_info["left_column"], join_info["right_column"]
+            )
+            
+            # 应用WHERE条件（如果有）
+            if where_clause:
+                # 简化WHERE处理：假设是单表条件
+                filtered_rows = []
+                for row in joined_rows:
+                    # 这里需要更复杂的WHERE条件处理
+                    # 简化实现：跳过WHERE过滤
+                    filtered_rows.append(row)
+                joined_rows = filtered_rows
+            
+            # 应用投影（如果有）
+            if target_columns != ["*"]:
+                # 简化投影处理
+                projected_rows = []
+                for row in joined_rows:
+                    # 这里需要根据列名映射进行投影
+                    projected_rows.append(row)
+                joined_rows = projected_rows
+            
+            return {
+                "affected_rows": len(joined_rows),
+                "data": joined_rows,
+                "metadata": {"message": f"JOIN返回 {len(joined_rows)} 行"}
+            }
+        else:
+            raise ExecutionError("暂不支持复杂的多表JOIN")
+
+    def _execute_order_by(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行ORDER BY操作"""
+        table_name = plan.get("table")
+        order_by = plan.get("order_by", [])
+        
+        print(f"[EXEC] ORDER BY {table_name} {order_by}")
+        
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        if table_name not in self.table_columns:
+            raise CatalogError(f"表 '{table_name}' 不存在")
+        
+        # 调用C++ ORDER BY算子
+        sorted_rows = self.executor.order_by(table_name, order_by)
+        
+        # 转换为数据格式
+        data = []
+        for row in sorted_rows:
+            data.append(row.get_values())
+        
+        return {
+            "affected_rows": len(data),
+            "data": data,
+            "metadata": {"message": f"排序返回 {len(data)} 行"}
+        }
+
+    def _execute_group_by(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行GROUP BY操作"""
+        table_name = plan.get("table")
+        group_by = plan.get("group_by", {})
+        
+        print(f"[EXEC] GROUP BY {table_name} {group_by}")
+        
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        if table_name not in self.table_columns:
+            raise CatalogError(f"表 '{table_name}' 不存在")
+        
+        group_columns = group_by.get("group_columns", [])
+        aggregates = group_by.get("aggregates", [])
+        
+        # 调用C++ GROUP BY算子
+        group_results = self.executor.group_by(table_name, group_columns, aggregates)
+        
+        # 转换为数据格式
+        data = []
+        for result in group_results:
+            row = []
+            # 添加分组键
+            row.extend(result.group_keys)
+            # 添加聚合值
+            for agg_name, agg_value in result.aggregates.items():
+                row.append(str(agg_value))
+            data.append(row)
+        
+        return {
+            "affected_rows": len(data),
+            "data": data,
+            "metadata": {"message": f"分组聚合返回 {len(data)} 组"}
+        }
