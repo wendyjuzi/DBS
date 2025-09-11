@@ -417,9 +417,20 @@ class Parser:
         return ASTNode("SELECT", None, children)
 
     def parse_from_clause(self):
-        """解析 FROM 子句，支持 JOIN"""
+        """解析 FROM 子句，支持 JOIN 和表别名"""
         table_name = self.expect("IDENTIFIER").lexeme
+        
+        # 检查是否有表别名
+        alias = None
+        if (self.current_token and 
+            self.current_token.type == "IDENTIFIER" and 
+            self.current_token.lexeme.upper() not in ["JOIN", "INNER", "LEFT", "RIGHT", "WHERE", "GROUP", "ORDER"]):
+            alias = self.current_token.lexeme
+            self.advance()
+        
         from_node = ASTNode("FROM", table_name)
+        if alias:
+            from_node.children.append(ASTNode("ALIAS", alias))
         
         # 检查是否有 JOIN
         while self.current_token and self.current_token.lexeme.upper() in ["JOIN", "INNER", "LEFT", "RIGHT"]:
@@ -438,6 +449,15 @@ class Parser:
             
         self.expect("KEYWORD", "JOIN")
         table_name = self.expect("IDENTIFIER").lexeme
+        
+        # 检查是否有表别名
+        alias = None
+        if (self.current_token and 
+            self.current_token.type == "IDENTIFIER" and 
+            self.current_token.lexeme.upper() != "ON"):
+            alias = self.current_token.lexeme
+            self.advance()
+        
         self.expect("KEYWORD", "ON", context="join_on_condition")
         
         # 解析 ON 条件
@@ -451,10 +471,12 @@ class Parser:
             ASTNode("RIGHT", right)
         ])
         
-        return ASTNode("JOIN", join_type, [
-            ASTNode("TABLE", table_name),
-            on_condition
-        ])
+        join_children = [ASTNode("TABLE", table_name)]
+        if alias:
+            join_children.append(ASTNode("ALIAS", alias))
+        join_children.append(on_condition)
+        
+        return ASTNode("JOIN", join_type, join_children)
 
     def parse_group_by(self):
         """解析 GROUP BY 子句"""

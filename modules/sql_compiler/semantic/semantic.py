@@ -353,6 +353,7 @@ class SemanticAnalyzer:
     def _check_select(self, ast):
         # 获取主表和所有涉及的表
         tables = []
+        table_aliases = {}  # 别名映射：alias -> table_name
         main_table = None
         
         # 查找 FROM 子句
@@ -363,6 +364,11 @@ class SemanticAnalyzer:
                 raise SemanticError("TableError", main_table, "表不存在")
             tables.append(main_table)
             
+            # 检查主表别名
+            alias_node = next((child for child in from_node.children if child.node_type == "ALIAS"), None)
+            if alias_node:
+                table_aliases[alias_node.value] = main_table
+            
             # 检查 JOIN 表
             for join_child in from_node.children:
                 if join_child.node_type == "JOIN":
@@ -372,10 +378,15 @@ class SemanticAnalyzer:
                             raise SemanticError("TableError", join_table, "JOIN 中的表不存在")
                         tables.append(join_table)
                         
+                        # 检查 JOIN 表别名
+                        join_alias_node = next((c for c in join_child.children if c.node_type == "ALIAS"), None)
+                        if join_alias_node:
+                            table_aliases[join_alias_node.value] = join_table
+                        
                         # 检查 ON 条件
                         on_node = next((c for c in join_child.children if c.node_type == "ON"), None)
                         if on_node:
-                            self._check_join_condition(tables, on_node)
+                            self._check_join_condition(tables, on_node, table_aliases)
 
         # 检查 SELECT 列
         for child in ast.children:
@@ -383,7 +394,7 @@ class SemanticAnalyzer:
                 # 跳过 * 通配符的检查，它表示选择所有列
                 if child.value == "*":
                     continue
-                if not self._column_exists_in_tables(tables, child.value):
+                if not self._column_exists_in_tables_with_aliases(tables, child.value, table_aliases):
                     raise SemanticError(
                         "ColumnError", child.value, "列不存在于任何表中",
                         available_tables=self._get_available_tables(),
@@ -393,7 +404,7 @@ class SemanticAnalyzer:
         # 检查 WHERE 子句
         where_node = next((child for child in ast.children if child.node_type == "WHERE"), None)
         if where_node:
-            self._check_where_multi_table(tables, where_node)
+            self._check_where_multi_table(tables, where_node, table_aliases)
 
         # 检查 GROUP BY 子句
         group_by_node = next((child for child in ast.children if child.node_type == "GROUP_BY"), None)
@@ -507,31 +518,61 @@ class SemanticAnalyzer:
                     return True
             return False
 
-    def _check_join_condition(self, tables, on_node):
+    def _column_exists_in_tables_with_aliases(self, tables, column_name, table_aliases):
+        """检查列是否存在于任何表中，支持表别名和 table.column 格式"""
+        # 如果是限定列名 (table.column 或 alias.column)
+        if '.' in column_name:
+            table_or_alias, col_name = column_name.split('.', 1)
+            
+            # 首先检查是否是别名
+            if table_or_alias in table_aliases:
+                actual_table = table_aliases[table_or_alias]
+                if self.catalog.has_column(actual_table, col_name):
+                    return True
+            
+            # 然后检查是否是实际表名
+            if table_or_alias in tables and self.catalog.has_column(table_or_alias, col_name):
+                return True
+            
+            return False
+        else:
+            # 普通列名，检查是否存在于任何表中
+            for table in tables:
+                if self.catalog.has_column(table, column_name):
+                    return True
+            return False
+
+    def _check_join_condition(self, tables, on_node, table_aliases=None):
         """检查 JOIN 的 ON 条件"""
         left = next((c.value for c in on_node.children if c.node_type == "LEFT"), None)
         right = next((c.value for c in on_node.children if c.node_type == "RIGHT"), None)
         
-        if left and not self._column_exists_in_tables(tables, left):
+        if table_aliases is None:
+            table_aliases = {}
+        
+        if left and not self._column_exists_in_tables_with_aliases(tables, left, table_aliases):
             raise SemanticError(
                 "ColumnError", left, "JOIN ON 条件中的左侧列不存在",
                 available_tables=self._get_available_tables(),
                 available_columns=self._get_available_columns()
             )
             
-        if right and not self._column_exists_in_tables(tables, right):
+        if right and not self._column_exists_in_tables_with_aliases(tables, right, table_aliases):
             raise SemanticError(
                 "ColumnError", right, "JOIN ON 条件中的右侧列不存在",
                 available_tables=self._get_available_tables(),
                 available_columns=self._get_available_columns()
             )
 
-    def _check_where_multi_table(self, tables, where_node):
+    def _check_where_multi_table(self, tables, where_node, table_aliases=None):
         """检查多表环境下的 WHERE 条件"""
+        if table_aliases is None:
+            table_aliases = {}
+            
         left = next((c for c in where_node.children if c.node_type == "LEFT"), None)
         right = next((c for c in where_node.children if c.node_type == "RIGHT"), None)
         
-        if left and not self._column_exists_in_tables(tables, left.value):
+        if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
             raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
         
         # right 通常是常量，不需要检查表中是否存在
@@ -545,7 +586,7 @@ class SemanticAnalyzer:
             # 这里我们假设非数字的CONST都是字符串常量
             else:
                 # 检查是否真的是列名
-                if self._column_exists_in_tables(tables, right.value):
+                if self._column_exists_in_tables_with_aliases(tables, right.value, table_aliases):
                     # 如果确实是列名，则允许
                     pass
                 else:
