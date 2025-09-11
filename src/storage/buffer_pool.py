@@ -40,6 +40,12 @@ class BufferPool:
     # buffer_pool.py 修改 get_page 方法
     def get_page(self, table: str, page_id: int) -> Optional[Page]:
         """获取页，如果不在缓存中则从磁盘加载"""
+        # 参数验证
+        if not table or not isinstance(table, str):
+            raise ValueError("表名不能为空且必须是字符串")
+        if page_id < 0:
+            raise ValueError("页号不能为负数")
+
         key = (table, page_id)
 
         # 检查缓存命中
@@ -67,6 +73,10 @@ class BufferPool:
                 page = Page(page_id)
             else:
                 page = Page(page_id, page_data)
+
+        # 如果缓存容量为0，直接返回页但不加入缓存
+        if self.capacity == 0:
+            return page
 
         # 如果缓存已满，执行替换策略
         if len(self.cache) >= self.capacity:
