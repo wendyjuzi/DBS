@@ -64,6 +64,8 @@ class Planner:
                 plan = self.plan_update(ast)
             elif stmt_type == "DELETE":
                 plan = self.plan_delete(ast)
+            elif stmt_type == "DROP_TABLE":
+                plan = self.plan_drop(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             
@@ -150,6 +152,9 @@ class Planner:
         else:
             root.add_child(scan)
         return root
+
+    def plan_drop(self, ast):
+        return LogicalPlan("DropTable", table=ast["table"])
 
 
 if __name__ == "__main__":

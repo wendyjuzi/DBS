@@ -171,6 +171,9 @@ class ASTNode:
                 result["where"] = {"left": left, "op": op, "right": right}
             else:
                 result["where"] = None
+                
+        elif self.node_type == "DROP_TABLE":
+            result["table"] = self.value
         else:
             # 默认格式，用于其他类型的节点
             result["value"] = self.value
@@ -223,6 +226,8 @@ class Parser:
             return self.delete()
         elif self.current_token.lexeme.upper() == "UPDATE":
             return self.update()
+        elif self.current_token.lexeme.upper() == "DROP":
+            return self.drop_table()
         else:
             # 提供上下文信息给智能诊断
             context = f"statement_start:{self.current_token.lexeme}"
@@ -233,18 +238,101 @@ class Parser:
         self.expect("KEYWORD", "TABLE")
         table_name = self.expect("IDENTIFIER").lexeme
         self.expect("DELIMITER", "(")
+        
         columns = []
+        primary_keys = []
+        foreign_keys = []
+        constraints = {}
+        
         while True:
-            col_name = self.expect("IDENTIFIER").lexeme
-            col_type = self.expect("IDENTIFIER").lexeme
-            columns.append((col_name, col_type))
+            # 检查是否是约束定义
+            if (self.current_token and self.current_token.type == "KEYWORD" and 
+                self.current_token.lexeme.upper() in ["PRIMARY", "FOREIGN", "CONSTRAINT"]):
+                
+                if self.current_token.lexeme.upper() == "PRIMARY":
+                    # 解析 PRIMARY KEY (col1, col2, ...)
+                    self.advance()  # PRIMARY
+                    self.expect("KEYWORD", "KEY")
+                    self.expect("DELIMITER", "(")
+                    while True:
+                        pk_col = self.expect("IDENTIFIER").lexeme
+                        primary_keys.append(pk_col)
+                        if self.current_token.lexeme == ",":
+                            self.advance()
+                        else:
+                            break
+                    self.expect("DELIMITER", ")")
+                    
+                elif self.current_token.lexeme.upper() == "FOREIGN":
+                    # 解析 FOREIGN KEY (col) REFERENCES table(col)
+                    self.advance()  # FOREIGN
+                    self.expect("KEYWORD", "KEY")
+                    self.expect("DELIMITER", "(")
+                    fk_col = self.expect("IDENTIFIER").lexeme
+                    self.expect("DELIMITER", ")")
+                    self.expect("KEYWORD", "REFERENCES")
+                    ref_table = self.expect("IDENTIFIER").lexeme
+                    self.expect("DELIMITER", "(")
+                    ref_col = self.expect("IDENTIFIER").lexeme
+                    self.expect("DELIMITER", ")")
+                    
+                    foreign_keys.append({
+                        'column': fk_col,
+                        'references_table': ref_table,
+                        'references_column': ref_col
+                    })
+            else:
+                # 解析普通列定义
+                col_name = self.expect("IDENTIFIER").lexeme
+                col_type = self.expect("IDENTIFIER").lexeme
+                
+                # 检查列级约束
+                col_constraints = []
+                while (self.current_token and self.current_token.type == "KEYWORD" and 
+                       self.current_token.lexeme.upper() in ["PRIMARY", "NOT", "UNIQUE"]):
+                    
+                    if self.current_token.lexeme.upper() == "PRIMARY":
+                        self.advance()
+                        self.expect("KEYWORD", "KEY")
+                        primary_keys.append(col_name)
+                        col_constraints.append("PRIMARY_KEY")
+                        
+                    elif self.current_token.lexeme.upper() == "NOT":
+                        self.advance()
+                        self.expect("KEYWORD", "NULL")
+                        col_constraints.append("NOT_NULL")
+                        
+                    elif self.current_token.lexeme.upper() == "UNIQUE":
+                        self.advance()
+                        col_constraints.append("UNIQUE")
+                
+                columns.append((col_name, col_type))
+                if col_constraints:
+                    constraints[col_name] = col_constraints
+            
             if self.current_token.lexeme == ",":
                 self.advance()
             else:
                 break
+                
         self.expect("DELIMITER", ")")
         self.expect("DELIMITER", ";")
-        return ASTNode("CREATE_TABLE", table_name, [ASTNode("COLUMN", col_name + ":" + col_type) for col_name, col_type in columns])
+        
+        # 构建 AST 节点
+        children = [ASTNode("COLUMN", col_name + ":" + col_type) for col_name, col_type in columns]
+        
+        if primary_keys:
+            children.append(ASTNode("PRIMARY_KEY", ",".join(primary_keys)))
+            
+        for fk in foreign_keys:
+            fk_node = ASTNode("FOREIGN_KEY", f"{fk['column']}:{fk['references_table']}.{fk['references_column']}")
+            children.append(fk_node)
+            
+        for col_name, col_constraints in constraints.items():
+            for constraint in col_constraints:
+                children.append(ASTNode("CONSTRAINT", f"{col_name}:{constraint}"))
+        
+        return ASTNode("CREATE_TABLE", table_name, children)
 
     def insert(self):
         self.expect("KEYWORD", "INSERT")
@@ -475,6 +563,14 @@ class Parser:
         op = self.expect("OPERATOR").lexeme
         right = self.expect("CONST").lexeme
         return ASTNode("WHERE", None, [ASTNode("LEFT", left), ASTNode("OP", op), ASTNode("RIGHT", right)])
+
+    def drop_table(self):
+        """解析 DROP TABLE 语句"""
+        self.expect("KEYWORD", "DROP")
+        self.expect("KEYWORD", "TABLE")
+        table_name = self.expect("IDENTIFIER").lexeme
+        self.expect("DELIMITER", ";")
+        return ASTNode("DROP_TABLE", table_name)
 
 # 测试
 if __name__ == "__main__":

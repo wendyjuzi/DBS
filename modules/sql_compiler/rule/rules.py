@@ -2,7 +2,8 @@
 KEYWORDS = {
     "SELECT", "FROM", "WHERE", "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "DELETE",
     "UPDATE", "SET", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "ON", 
-    "ORDER", "BY", "GROUP", "ASC", "DESC", "HAVING"
+    "ORDER", "BY", "GROUP", "ASC", "DESC", "HAVING", "PRIMARY", "KEY", "FOREIGN",
+    "REFERENCES", "CONSTRAINT", "NOT", "NULL", "UNIQUE", "DROP"
 }
 
 class Column:

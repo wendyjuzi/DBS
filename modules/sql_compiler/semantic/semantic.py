@@ -35,16 +35,43 @@ class SemanticError(Exception):
 
 class Catalog:
     """
-    模式目录（记录表结构）
-    {table_name: {column_name: column_type}}
+    增强的模式目录（记录表结构、主键、外键约束）
     """
     def __init__(self):
-        self.tables = {}
+        self.tables = {}  # {table_name: {column_name: column_type}}
+        self.primary_keys = {}  # {table_name: [primary_key_columns]}
+        self.foreign_keys = {}  # {table_name: [{column: str, references_table: str, references_column: str}]}
+        self.constraints = {}  # {table_name: {column_name: [constraints]}} (NOT NULL, UNIQUE等)
 
-    def create_table(self, table_name, columns):
+    def create_table(self, table_name, columns, primary_keys=None, foreign_keys=None, constraints=None):
         if table_name in self.tables:
             raise SemanticError("TableError", table_name, "表已存在")
+        
         self.tables[table_name] = columns
+        self.primary_keys[table_name] = primary_keys or []
+        self.foreign_keys[table_name] = foreign_keys or []
+        self.constraints[table_name] = constraints or {}
+
+    def drop_table(self, table_name):
+        """删除表及其所有约束"""
+        if table_name not in self.tables:
+            raise SemanticError("TableError", table_name, "要删除的表不存在")
+        
+        # 检查是否有其他表引用此表作为外键
+        for other_table, fks in self.foreign_keys.items():
+            if other_table != table_name:
+                for fk in fks:
+                    if fk.get('references_table') == table_name:
+                        raise SemanticError(
+                            "ForeignKeyError", table_name, 
+                            f"无法删除表，被表 {other_table} 的外键约束引用"
+                        )
+        
+        # 删除表和所有相关约束
+        del self.tables[table_name]
+        del self.primary_keys[table_name]
+        del self.foreign_keys[table_name]
+        del self.constraints[table_name]
 
     def has_table(self, table_name):
         return table_name in self.tables
@@ -54,6 +81,49 @@ class Catalog:
 
     def get_column_type(self, table_name, column_name):
         return self.tables[table_name].get(column_name, None)
+
+    def get_primary_keys(self, table_name):
+        return self.primary_keys.get(table_name, [])
+
+    def get_foreign_keys(self, table_name):
+        return self.foreign_keys.get(table_name, [])
+
+    def has_primary_key(self, table_name, column_name):
+        return column_name in self.primary_keys.get(table_name, [])
+
+    def add_foreign_key(self, table_name, column_name, ref_table, ref_column):
+        """添加外键约束"""
+        if table_name not in self.foreign_keys:
+            self.foreign_keys[table_name] = []
+        
+        self.foreign_keys[table_name].append({
+            'column': column_name,
+            'references_table': ref_table,
+            'references_column': ref_column
+        })
+
+    def validate_foreign_key_references(self):
+        """验证所有外键引用的完整性"""
+        errors = []
+        for table_name, fks in self.foreign_keys.items():
+            for fk in fks:
+                ref_table = fk['references_table']
+                ref_column = fk['references_column']
+                
+                # 检查引用的表是否存在
+                if not self.has_table(ref_table):
+                    errors.append(f"表 {table_name} 的外键引用了不存在的表 {ref_table}")
+                
+                # 检查引用的列是否存在
+                elif not self.has_column(ref_table, ref_column):
+                    errors.append(f"表 {table_name} 的外键引用了表 {ref_table} 中不存在的列 {ref_column}")
+                
+                # 检查引用的列是否是主键（推荐但不强制）
+                elif not self.has_primary_key(ref_table, ref_column):
+                    # 这是一个警告而不是错误
+                    pass
+        
+        return errors
 
 
 class SemanticAnalyzer:
@@ -89,17 +159,97 @@ class SemanticAnalyzer:
             self._check_update(ast)
         elif node_type == "DELETE":
             self._check_delete(ast)
+        elif node_type == "DROP_TABLE":
+            self._check_drop(ast)
 
     def _check_create(self, ast):
         table_name = ast.value
         columns = {}
+        primary_keys = []
+        foreign_keys = []
+        constraints = {}
+        
         for child in ast.children:
-            col_name = child.value.split(":")[0]
-            col_type = child.value.split(":")[1]
-            columns[col_name] = col_type
+            if child.node_type == "COLUMN":
+                col_name = child.value.split(":")[0]
+                col_type = child.value.split(":")[1]
+                columns[col_name] = col_type
+                
+            elif child.node_type == "PRIMARY_KEY":
+                primary_keys = child.value.split(",")
+                
+            elif child.node_type == "FOREIGN_KEY":
+                # 格式: column:ref_table.ref_column
+                parts = child.value.split(":")
+                fk_column = parts[0]
+                ref_parts = parts[1].split(".")
+                ref_table = ref_parts[0]
+                ref_column = ref_parts[1]
+                
+                foreign_keys.append({
+                    'column': fk_column,
+                    'references_table': ref_table,
+                    'references_column': ref_column
+                })
+                
+            elif child.node_type == "CONSTRAINT":
+                # 格式: column:constraint_type
+                col_name, constraint_type = child.value.split(":")
+                if col_name not in constraints:
+                    constraints[col_name] = []
+                constraints[col_name].append(constraint_type)
+        
+        # 验证主键列存在
+        for pk_col in primary_keys:
+            if pk_col not in columns:
+                raise SemanticError(
+                    "PrimaryKeyError", pk_col, f"主键列 '{pk_col}' 不存在于表定义中",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+        
+        # 验证外键列存在
+        for fk in foreign_keys:
+            if fk['column'] not in columns:
+                raise SemanticError(
+                    "ForeignKeyError", fk['column'], f"外键列 '{fk['column']}' 不存在于表定义中",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+            
+            # 检查引用的表是否存在
+            ref_table = fk['references_table']
+            if not self.catalog.has_table(ref_table):
+                raise SemanticError(
+                    "ForeignKeyError", ref_table, 
+                    f"外键引用的表 '{ref_table}' 不存在",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+            
+            # 检查引用的列是否存在
+            if not self.catalog.has_column(ref_table, fk['references_column']):
+                raise SemanticError(
+                    "ForeignKeyError", fk['references_column'], 
+                    f"外键引用的列 '{fk['references_column']}' 在表 '{ref_table}' 中不存在",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+        
         try:
-            self.catalog.create_table(table_name, columns)
+            self.catalog.create_table(table_name, columns, primary_keys, foreign_keys, constraints)
             print(f"[OK] CREATE TABLE {table_name} 语义检查通过")
+            
+            # 输出约束信息
+            if primary_keys:
+                print(f"    主键: {', '.join(primary_keys)}")
+            if foreign_keys:
+                for fk in foreign_keys:
+                    print(f"    外键: {fk['column']} -> {fk['references_table']}.{fk['references_column']}")
+            if constraints:
+                for col, cons in constraints.items():
+                    print(f"    约束: {col} - {', '.join(cons)}")
+                    
         except SemanticError as e:
             # 重新抛出带有上下文的错误
             raise SemanticError(
@@ -150,7 +300,55 @@ class SemanticAnalyzer:
                         available_columns=self._get_available_columns()
                     )
 
+        # 检查主键约束
+        primary_keys = self.catalog.get_primary_keys(table_name)
+        for pk_col in primary_keys:
+            if pk_col not in columns:
+                raise SemanticError(
+                    "PrimaryKeyError", pk_col, f"INSERT 语句缺少主键列 '{pk_col}' 的值",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+            # 检查主键值不为空
+            pk_index = columns.index(pk_col)
+            if not values[pk_index] or str(values[pk_index]).strip() == "":
+                raise SemanticError(
+                    "PrimaryKeyError", pk_col, f"主键列 '{pk_col}' 的值不能为空",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+
+        # 检查外键约束
+        foreign_keys = self.catalog.get_foreign_keys(table_name)
+        for fk in foreign_keys:
+            fk_col = fk['column']
+            if fk_col in columns:
+                fk_index = columns.index(fk_col)
+                fk_value = values[fk_index]
+                
+                # 检查外键引用的表和列是否存在
+                ref_table = fk['references_table']
+                ref_column = fk['references_column']
+                
+                if not self.catalog.has_table(ref_table):
+                    raise SemanticError(
+                        "ForeignKeyError", fk_col, f"外键引用的表 '{ref_table}' 不存在",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
+                    
+                if not self.catalog.has_column(ref_table, ref_column):
+                    raise SemanticError(
+                        "ForeignKeyError", fk_col, f"外键引用的列 '{ref_column}' 在表 '{ref_table}' 中不存在",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
+
         print(f"[OK] INSERT INTO {table_name} 语义检查通过")
+        if primary_keys:
+            print(f"    主键约束检查通过")
+        if foreign_keys:
+            print(f"    外键约束检查通过")
 
     def _check_select(self, ast):
         # 获取主表和所有涉及的表
@@ -353,3 +551,40 @@ class SemanticAnalyzer:
                 else:
                     # 如果不是列名，则认为是字符串常量，跳过检查
                     pass
+
+    def _check_drop(self, ast):
+        """检查 DROP TABLE 语句"""
+        table_name = ast.value
+        
+        # 检查表是否存在
+        if not self.catalog.has_table(table_name):
+            raise SemanticError(
+                "TableError", table_name, "要删除的表不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
+        
+        # 检查是否有其他表引用此表作为外键
+        for other_table, fks in self.catalog.foreign_keys.items():
+            if other_table != table_name:
+                for fk in fks:
+                    if fk.get('references_table') == table_name:
+                        raise SemanticError(
+                            "ForeignKeyError", table_name, 
+                            f"无法删除表，被表 {other_table} 的外键约束引用",
+                            available_tables=self._get_available_tables(),
+                            available_columns=self._get_available_columns()
+                        )
+        
+        # 执行删除操作
+        try:
+            self.catalog.drop_table(table_name)
+            print(f"[OK] DROP TABLE {table_name} 语义检查通过")
+            print(f"    表 {table_name} 已从目录中删除")
+        except SemanticError as e:
+            # 重新抛出带有上下文的错误
+            raise SemanticError(
+                e.error_type, e.position, e.message,
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
