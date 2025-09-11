@@ -1,13 +1,36 @@
 # semantic.py
 
+# 尝试导入智能诊断模块
+try:
+    from modules.sql_compiler.diagnostics.error_diagnostic import SmartErrorDiagnostic, ErrorFormatter
+    DIAGNOSTICS_AVAILABLE = True
+except ImportError:
+    DIAGNOSTICS_AVAILABLE = False
+
 class SemanticError(Exception):
-    def __init__(self, error_type, position, message):
+    def __init__(self, error_type, position, message, available_tables=None, available_columns=None):
         self.error_type = error_type
         self.position = position
         self.message = message
+        
+        if DIAGNOSTICS_AVAILABLE:
+            # 使用智能诊断
+            diagnostic_engine = SmartErrorDiagnostic()
+            
+            self.diagnostic = diagnostic_engine.diagnose_semantic_error(
+                error_type, position, message, available_tables, available_columns
+            )
+            enhanced_message = ErrorFormatter.format_diagnostic(self.diagnostic)
+            super().__init__(enhanced_message)
+        else:
+            # 回退到原始错误格式
+            super().__init__(f"[{error_type}, {position}, {message}]")
 
     def __str__(self):
-        return f"[{self.error_type}, {self.position}, {self.message}]"
+        if hasattr(self, 'diagnostic') and DIAGNOSTICS_AVAILABLE:
+            return ErrorFormatter.format_diagnostic(self.diagnostic)
+        else:
+            return f"[{self.error_type}, {self.position}, {self.message}]"
 
 
 class Catalog:
@@ -36,6 +59,14 @@ class Catalog:
 class SemanticAnalyzer:
     def __init__(self, catalog: Catalog):
         self.catalog = catalog
+    
+    def _get_available_tables(self):
+        """获取可用表列表"""
+        return list(self.catalog.tables.keys())
+    
+    def _get_available_columns(self):
+        """获取可用列映射"""
+        return {table: list(columns.keys()) for table, columns in self.catalog.tables.items()}
 
     def analyze(self, ast):
         # 如果传入的是列表，遍历处理
@@ -66,30 +97,58 @@ class SemanticAnalyzer:
             col_name = child.value.split(":")[0]
             col_type = child.value.split(":")[1]
             columns[col_name] = col_type
-        self.catalog.create_table(table_name, columns)
-        print(f"[OK] CREATE TABLE {table_name} 语义检查通过")
+        try:
+            self.catalog.create_table(table_name, columns)
+            print(f"[OK] CREATE TABLE {table_name} 语义检查通过")
+        except SemanticError as e:
+            # 重新抛出带有上下文的错误
+            raise SemanticError(
+                e.error_type, e.position, e.message,
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
 
     def _check_insert(self, ast):
         table_name = ast.value
         if not self.catalog.has_table(table_name):
-            raise SemanticError("TableError", table_name, "表不存在")
+            raise SemanticError(
+                "TableError", table_name, "表不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
 
         columns = [c.value for c in ast.children if c.node_type == "COLUMN"]
         values = [v.value for v in ast.children if v.node_type == "VALUE"]
 
         if len(columns) != len(values):
-            raise SemanticError("ColumnCountError", table_name, "列数和值数量不一致")
+            raise SemanticError(
+                "ColumnCountError", table_name, "列数和值数量不一致",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
 
         for col, val in zip(columns, values):
             if not self.catalog.has_column(table_name, col):
-                raise SemanticError("ColumnError", col, "列不存在")
+                raise SemanticError(
+                    "ColumnError", col, "列不存在",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
             expected_type = self.catalog.get_column_type(table_name, col)
             if expected_type == "INT":
                 if not str(val).isdigit():
-                    raise SemanticError("TypeError", col, f"期望 INT, 但得到 {val}")
+                    raise SemanticError(
+                        "TypeError", col, f"期望 INT, 但得到 {val}",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
             elif expected_type == "VARCHAR":
                 if not isinstance(val, str):
-                    raise SemanticError("TypeError", col, f"期望 VARCHAR, 但得到 {val}")
+                    raise SemanticError(
+                        "TypeError", col, f"期望 VARCHAR, 但得到 {val}",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
 
         print(f"[OK] INSERT INTO {table_name} 语义检查通过")
 
@@ -123,8 +182,15 @@ class SemanticAnalyzer:
         # 检查 SELECT 列
         for child in ast.children:
             if child.node_type == "COLUMN":
+                # 跳过 * 通配符的检查，它表示选择所有列
+                if child.value == "*":
+                    continue
                 if not self._column_exists_in_tables(tables, child.value):
-                    raise SemanticError("ColumnError", child.value, "列不存在于任何表中")
+                    raise SemanticError(
+                        "ColumnError", child.value, "列不存在于任何表中",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
 
         # 检查 WHERE 子句
         where_node = next((child for child in ast.children if child.node_type == "WHERE"), None)
@@ -249,10 +315,18 @@ class SemanticAnalyzer:
         right = next((c.value for c in on_node.children if c.node_type == "RIGHT"), None)
         
         if left and not self._column_exists_in_tables(tables, left):
-            raise SemanticError("ColumnError", left, "JOIN ON 条件中的左侧列不存在")
+            raise SemanticError(
+                "ColumnError", left, "JOIN ON 条件中的左侧列不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
             
         if right and not self._column_exists_in_tables(tables, right):
-            raise SemanticError("ColumnError", right, "JOIN ON 条件中的右侧列不存在")
+            raise SemanticError(
+                "ColumnError", right, "JOIN ON 条件中的右侧列不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
 
     def _check_where_multi_table(self, tables, where_node):
         """检查多表环境下的 WHERE 条件"""
