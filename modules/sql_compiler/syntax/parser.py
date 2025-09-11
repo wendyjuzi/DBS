@@ -2,16 +2,53 @@ from modules.sql_compiler.lexical.lexer import Lexer, Token, ERROR_TYPES
 from modules.sql_compiler.rule.rules import KEYWORDS
 from modules.sql_compiler.semantic.semantic import SemanticAnalyzer, Catalog, SemanticError
 
+# 尝试导入智能诊断模块
+try:
+    from modules.sql_compiler.diagnostics.error_diagnostic import SmartErrorDiagnostic, ErrorFormatter
+    DIAGNOSTICS_AVAILABLE = True
+except ImportError:
+    DIAGNOSTICS_AVAILABLE = False
+
 
 class ParseError(Exception):
     """自定义语法分析错误类"""
-    def __init__(self, message, token=None):
+    def __init__(self, message, token=None, context=""):
         self.message = message
         self.token = token
-        super().__init__(self.message)
+        self.context = context
+        
+        if DIAGNOSTICS_AVAILABLE:
+            # 使用智能诊断
+            diagnostic_engine = SmartErrorDiagnostic()
+            expected = self._extract_expected_from_message(message)
+            got = token.lexeme if token else ""
+            line = token.line if token else 0
+            column = token.column if token else 0
+            
+            self.diagnostic = diagnostic_engine.diagnose_syntax_error(
+                message, expected, got, line, column, context
+            )
+            enhanced_message = ErrorFormatter.format_diagnostic(self.diagnostic)
+            super().__init__(enhanced_message)
+        else:
+            # 回退到原始错误格式
+            if token:
+                super().__init__(f"Syntax Error: {message} at line {token.line}, column {token.column}")
+            else:
+                super().__init__(f"Syntax Error: {message}")
+    
+    def _extract_expected_from_message(self, message: str) -> str:
+        """从错误消息中提取期望的内容"""
+        if "expected" in message.lower():
+            parts = message.split("expected")
+            if len(parts) > 1:
+                return parts[1].split("but")[0].strip()
+        return ""
 
     def __str__(self):
-        if self.token:
+        if hasattr(self, 'diagnostic') and DIAGNOSTICS_AVAILABLE:
+            return ErrorFormatter.format_diagnostic(self.diagnostic)
+        elif self.token:
             return f"Syntax Error: {self.message} at line {self.token.line}, column {self.token.column}"
         else:
             return f"Syntax Error: {self.message}"
@@ -154,13 +191,15 @@ class Parser:
         else:
             self.current_token = None
 
-    def expect(self, token_type, lexeme=None):
+    def expect(self, token_type, lexeme=None, context=""):
         if not self.current_token:
-            raise ParseError(f"Unexpected end of input, expected {token_type}", None)
+            raise ParseError(f"Unexpected end of input, expected {token_type}", None, context)
         if self.current_token.type != token_type:
-            raise ParseError(f"Expected token type {token_type} but got {self.current_token.type}", self.current_token)
+            context_info = f"{context}:expected_{token_type}_got_{self.current_token.type}"
+            raise ParseError(f"Expected token type {token_type} but got {self.current_token.type}", self.current_token, context_info)
         if lexeme and self.current_token.lexeme.upper() != lexeme.upper():
-            raise ParseError(f"Expected '{lexeme}' but got '{self.current_token.lexeme}'", self.current_token)
+            context_info = f"{context}:expected_{lexeme}_got_{self.current_token.lexeme}"
+            raise ParseError(f"Expected '{lexeme}' but got '{self.current_token.lexeme}'", self.current_token, context_info)
         token = self.current_token
         self.advance()
         return token
@@ -185,7 +224,9 @@ class Parser:
         elif self.current_token.lexeme.upper() == "UPDATE":
             return self.update()
         else:
-            raise ParseError(f"Unknown statement '{self.current_token.lexeme}'", self.current_token)
+            # 提供上下文信息给智能诊断
+            context = f"statement_start:{self.current_token.lexeme}"
+            raise ParseError(f"Unknown statement '{self.current_token.lexeme}'", self.current_token, context)
 
     def create_table(self):
         self.expect("KEYWORD", "CREATE")
@@ -239,11 +280,16 @@ class Parser:
     def select(self):
         self.expect("KEYWORD", "SELECT")
         
-        # 解析列名
+        # 解析列名（支持 * 通配符）
         columns = []
         while True:
-            columns.append(self.parse_qualified_identifier())
-            if self.current_token.lexeme == ",":
+            if self.current_token and self.current_token.type == "OPERATOR" and self.current_token.lexeme == "*":
+                columns.append("*")
+                self.advance()
+            else:
+                columns.append(self.parse_qualified_identifier())
+            
+            if self.current_token and self.current_token.lexeme == ",":
                 self.advance()
             else:
                 break
@@ -304,11 +350,11 @@ class Parser:
             
         self.expect("KEYWORD", "JOIN")
         table_name = self.expect("IDENTIFIER").lexeme
-        self.expect("KEYWORD", "ON")
+        self.expect("KEYWORD", "ON", context="join_on_condition")
         
         # 解析 ON 条件
         left = self.parse_qualified_identifier()
-        op = self.expect("OPERATOR").lexeme
+        op = self.expect("OPERATOR", context="join_on_operator").lexeme
         right = self.parse_qualified_identifier()
         
         on_condition = ASTNode("ON", None, [
@@ -412,12 +458,12 @@ class Parser:
 
     def parse_qualified_identifier(self):
         """解析可能带有表名限定的标识符 (table.column 或 column)"""
-        identifier = self.expect("IDENTIFIER").lexeme
+        identifier = self.expect("IDENTIFIER", context="qualified_identifier").lexeme
         
         # 检查是否有表名限定符 (.)
         if self.current_token and self.current_token.lexeme == ".":
             self.advance()  # 跳过 '.'
-            column = self.expect("IDENTIFIER").lexeme
+            column = self.expect("IDENTIFIER", context="qualified_identifier_column").lexeme
             return f"{identifier}.{column}"
         else:
             return identifier

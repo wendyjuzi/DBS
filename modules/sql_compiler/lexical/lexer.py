@@ -3,6 +3,13 @@ import re
 from modules.sql_compiler.rule.rules import KEYWORDS
 from modules.sql_compiler.lexical.my_token import Token
 
+# 尝试导入智能诊断模块
+try:
+    from modules.sql_compiler.diagnostics.error_diagnostic import SmartErrorDiagnostic, ErrorFormatter
+    DIAGNOSTICS_AVAILABLE = True
+except ImportError:
+    DIAGNOSTICS_AVAILABLE = False
+
 ERROR_TYPES = {
     "UNTERMINATED_STRING": "Unterminated String",
     "UNKNOWN_SYMBOL": "Unknown Symbol",
@@ -19,6 +26,7 @@ class Lexer:
         self.column = 1
         self.tokens = []
         self.errors = []  # 保存错误四元式
+        self.diagnostics = SmartErrorDiagnostic() if DIAGNOSTICS_AVAILABLE else None
 
     def peek(self):
         if self.pos < len(self.text):
@@ -41,7 +49,24 @@ class Lexer:
     def add_error(self, error_type, lexeme, line, column):
         error = [error_type, lexeme, line, column]
         self.errors.append(error)
-        print(f"❌ Lexical Error: {error_type} '{lexeme}' at line {line}, column {column}")
+        
+        if self.diagnostics:
+            # 使用智能诊断
+            source_line = self._get_source_line(line)
+            diagnostic = self.diagnostics.diagnose_lexical_error(
+                error_type, lexeme, line, column, source_line
+            )
+            print(ErrorFormatter.format_diagnostic(diagnostic))
+        else:
+            # 回退到原始错误格式
+            print(f"❌ Lexical Error: {error_type} '{lexeme}' at line {line}, column {column}")
+    
+    def _get_source_line(self, line_num):
+        """获取源代码行"""
+        lines = self.text.split('\n')
+        if 1 <= line_num <= len(lines):
+            return lines[line_num - 1]
+        return ""
 
     def skip_whitespace(self):
         while self.peek() is not None and self.peek().isspace():
@@ -99,6 +124,8 @@ class Lexer:
         if char in "=<>":
             if self.peek() == '=':
                 char += self.advance()
+            self.add_token("OPERATOR", char, self.line, start_col)
+        elif char in "+-*/%":
             self.add_token("OPERATOR", char, self.line, start_col)
         elif char in "(),;.":
             self.add_token("DELIMITER", char, self.line, start_col)
