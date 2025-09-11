@@ -30,6 +30,7 @@ class HybridDatabaseCLI:
             print("=== 混合架构数据库系统 (SQL编译器 + C++执行引擎) ===")
             print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE")
             print("输入 'exit' 退出, 'help' 查看帮助, 'tables' 显示所有表")
+            print("输入 'cache' 查看缓存统计, 'flushcache' 刷新缓存到磁盘")
             print("注意: 适配 modules/sql_compiler 的语法限制\n")
         except Exception as e:
             print(f"数据库初始化失败: {str(e)}")
@@ -73,6 +74,14 @@ class HybridDatabaseCLI:
                         self._flush_database()
                         break
                     
+                    if line.lower() == "cache":
+                        self._show_cache()
+                        break
+
+                    if line.lower() == "flushcache":
+                        self._flush_cache()
+                        break
+                    
                     # 收集SQL行
                     sql_lines.append(line)
                     
@@ -108,19 +117,19 @@ class HybridDatabaseCLI:
             self._display_result(result, execution_time)
             
         except SQLSyntaxError as e:
-            print(f"❌ SQL语法错误: {str(e)}")
+            print(f" SQL语法错误: {str(e)}")
             self._show_syntax_help()
         except ExecutionError as e:
-            print(f"❌ 执行错误: {str(e)}")
+            print(f" 执行错误: {str(e)}")
         except Exception as e:
-            print(f"❌ 未知错误: {str(e)}")
+            print(f" 未知错误: {str(e)}")
         
         print("-" * 60)
 
     def _display_result(self, result: Dict[str, Any], execution_time: float):
         """显示查询结果"""
         if result.get("status") == "error":
-            print(f"❌ 执行失败: {result.get('error', '未知错误')}")
+            print(f" 执行失败: {result.get('error', '未知错误')}")
             return
         
         data = result.get("data", [])
@@ -142,7 +151,7 @@ class HybridDatabaseCLI:
         
         # 显示执行时间
         if execution_time > 0:
-            print(f"⏱️  执行时间: {execution_time:.4f}秒")
+            print(f"⏱  执行时间: {execution_time:.4f}秒")
 
     def _print_table(self, columns: List[str], data: List[List[str]]):
         """打印表格"""
@@ -187,11 +196,13 @@ class HybridDatabaseCLI:
 📖 混合架构数据库系统帮助
 
 🔧 系统命令:
-  help     - 显示此帮助信息
-  tables   - 显示所有表
-  clear    - 清屏
-  flush    - 刷盘数据到磁盘
-  exit     - 退出程序
+  help       - 显示此帮助信息
+  tables     - 显示所有表
+  clear      - 清屏
+  flush      - 刷盘数据到磁盘
+  cache      - 显示缓存统计
+  flushcache - 刷新缓存并刷盘
+  exit       - 退出程序
 
 📝 SQL语句支持:
   CREATE TABLE table_name (col1 type1, col2 type2, ...)  - 创建表
@@ -199,6 +210,10 @@ class HybridDatabaseCLI:
   SELECT col1, col2 FROM table_name [WHERE condition]    - 查询数据
   DELETE FROM table_name [WHERE condition]               - 删除数据
   UPDATE table_name SET col1=val1 [WHERE condition]      - 更新数据
+  DROP TABLE table_name                                  - 删除表
+  SELECT ... FROM table1 JOIN table2 ON col1=col2        - 表连接
+  SELECT ... FROM table ORDER BY col [ASC/DESC]          - 排序查询
+  SELECT ... FROM table GROUP BY col                     - 分组查询
 
 📊 支持的数据类型:
   INT     - 整数
@@ -216,7 +231,14 @@ class HybridDatabaseCLI:
   CREATE TABLE students (id INT, name STRING, age INT, score DOUBLE);
   INSERT INTO students (id, name, age, score) VALUES (1, 'Alice', 20, 85.5);
   SELECT name, score FROM students WHERE age > 18;
+  UPDATE students SET score = 90.0 WHERE id = 1;
   DELETE FROM students WHERE id = 1;
+  DROP TABLE students;
+  
+  -- 高级查询示例:
+  SELECT s.name, c.course FROM students s JOIN courses c ON s.id = c.student_id;
+  SELECT name, score FROM students ORDER BY score DESC;
+  SELECT age, COUNT(*) FROM students GROUP BY age;
         """
         print(help_text)
 
@@ -245,6 +267,24 @@ class HybridDatabaseCLI:
    ✅ WHERE score > 80
    ❌ WHERE id >= 3 AND id <= 7
    ❌ WHERE name = 'Alice' OR age > 20
+
+5. DROP TABLE:
+   ✅ DROP TABLE table_name;
+   ❌ DROP TABLE IF EXISTS table_name;
+
+6. JOIN查询:
+   ✅ SELECT t1.col1, t2.col2 FROM table1 t1 JOIN table2 t2 ON t1.id = t2.id;
+   ❌ SELECT * FROM table1 JOIN table2 ON condition;
+
+7. ORDER BY:
+   ✅ SELECT col1, col2 FROM table ORDER BY col1 ASC;
+   ✅ SELECT col1, col2 FROM table ORDER BY col1 DESC;
+   ❌ SELECT * FROM table ORDER BY col1, col2;
+
+8. GROUP BY:
+   ✅ SELECT col1, COUNT(*) FROM table GROUP BY col1;
+   ✅ SELECT col1, SUM(col2) FROM table GROUP BY col1;
+   ❌ SELECT * FROM table GROUP BY col1;
         """
         print(syntax_help)
 
@@ -255,13 +295,13 @@ class HybridDatabaseCLI:
             tables = catalog_info.get("tables", [])
             
             if tables:
-                print("📋 数据库中的表:")
+                print(" 数据库中的表:")
                 for table in tables:
                     print(f"  • {table}")
             else:
-                print("📋 数据库中没有表")
+                print(" 数据库中没有表")
         except Exception as e:
-            print(f"❌ 获取表列表失败: {str(e)}")
+            print(f" 获取表列表失败: {str(e)}")
 
     def _flush_database(self):
         """刷盘数据"""
@@ -269,7 +309,7 @@ class HybridDatabaseCLI:
             self.adapter.flush()
             print("✓ 数据已刷盘到磁盘")
         except Exception as e:
-            print(f"❌ 刷盘失败: {str(e)}")
+            print(f" 刷盘失败: {str(e)}")
 
     def _cleanup(self):
         """清理资源"""
@@ -277,7 +317,26 @@ class HybridDatabaseCLI:
             self.adapter.flush()
             print("✓ 数据已保存")
         except Exception as e:
-            print(f"⚠️  保存数据时出错: {str(e)}")
+            print(f"⚠  保存数据时出错: {str(e)}")
+
+    def _show_cache(self):
+        """显示缓存统计信息"""
+        try:
+            stats = self.adapter.get_cache_stats()
+            print("缓存统计:")
+            print(f"  Python缓存: {stats.get('python_cache', {})}")
+            print(f"  混合统计: {stats.get('hybrid_stats', {})}")
+            print(f"  C++加速: {stats.get('cpp_enabled', False)}")
+        except Exception as e:
+            print(f" 获取缓存统计失败: {str(e)}")
+
+    def _flush_cache(self):
+        """刷新缓存到磁盘"""
+        try:
+            self.adapter.flush_cache()
+            print("✓ 缓存已刷新并刷盘")
+        except Exception as e:
+            print(f" 刷新缓存失败: {str(e)}")
 
 
 def main():

@@ -45,6 +45,8 @@ class HybridExecutionEngine:
                 result = self._execute_select(plan)
             elif plan_type == "DELETE":
                 result = self._execute_delete(plan)
+            elif plan_type == "DROP_TABLE":
+                result = self._execute_drop_table(plan)
             else:
                 raise Exception(f"不支持的查询计划类型: {plan_type}")
             
@@ -215,3 +217,34 @@ class HybridExecutionEngine:
     def flush_all_dirty_pages(self):
         """刷盘所有脏页"""
         self.storage.flush_all_dirty_pages()
+
+    def _execute_drop_table(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行DROP TABLE操作"""
+        table_name = plan["table"]
+        
+        print(f"[EXEC] DROP TABLE {table_name}")
+        
+        # 检查表是否存在
+        if table_name not in self.table_columns:
+            # 尝试从存储引擎获取表信息
+            try:
+                cols = self.storage.get_table_columns(table_name)
+                if not cols:
+                    raise Exception(f"表 '{table_name}' 不存在")
+            except Exception:
+                raise Exception(f"表 '{table_name}' 不存在")
+        
+        # 调用C++ DROP TABLE算子
+        success = self.executor.drop_table(table_name)
+        
+        if success:
+            # 清理本地缓存
+            if table_name in self.table_columns:
+                del self.table_columns[table_name]
+            
+            return {
+                "affected_rows": 0,
+                "metadata": {"message": f"表 '{table_name}' 删除成功"}
+            }
+        else:
+            raise Exception(f"表 '{table_name}' 删除失败")

@@ -49,7 +49,7 @@ class Lexer:
     def add_error(self, error_type, lexeme, line, column):
         error = [error_type, lexeme, line, column]
         self.errors.append(error)
-        
+
         if self.diagnostics:
             # 使用智能诊断
             source_line = self._get_source_line(line)
@@ -60,7 +60,7 @@ class Lexer:
         else:
             # 回退到原始错误格式
             print(f"❌ Lexical Error: {error_type} '{lexeme}' at line {line}, column {column}")
-    
+
     def _get_source_line(self, line_num):
         """获取源代码行"""
         lines = self.text.split('\n')
@@ -127,7 +127,7 @@ class Lexer:
             self.add_token("OPERATOR", char, self.line, start_col)
         elif char in "+-*/%":
             self.add_token("OPERATOR", char, self.line, start_col)
-        elif char in "(),;.":
+        elif char in "(),;.*":
             self.add_token("DELIMITER", char, self.line, start_col)
         else:
             self.add_error(ERROR_TYPES["UNKNOWN_SYMBOL"], char, self.line, start_col)
