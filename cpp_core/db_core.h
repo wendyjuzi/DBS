@@ -3,6 +3,7 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/functional.h>
 #include <vector>
 #include <map>
 #include <string>
@@ -11,6 +12,8 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <iostream>
+#include <tuple>
 
 namespace py = pybind11;
 
@@ -315,6 +318,14 @@ private:
     // 表的最大页ID：表名 → 最大页ID（用于创建新页）
     std::map<std::string, size_t> table_max_page_id;
 
+    // 内存主键索引（简化B+树行为）：表名 → { pk列下标, 有效标志, 有序映射pk→整行值 }
+    struct TableIndex {
+        bool enabled = false;
+        size_t pk_index = 0;
+        std::map<std::string, std::vector<std::string>> pk_to_row_values;
+    };
+    std::map<std::string, TableIndex> primary_indexes;
+
 public:
     StorageEngine() {
         // 初始化表的最大页ID（从磁盘读取已存在的页）
@@ -331,6 +342,14 @@ public:
             }
             table_max_page_id[table_name] = max_id;
         }
+
+        // 为已存在的表初始化主键索引（内存）
+        for (const auto& table_name : table_names) {
+            auto schema_opt = catalog.get_table_schema(table_name);
+            if (schema_opt) {
+                init_primary_index(*schema_opt);
+            }
+        }
     }
 
     // 获取页（缓存优先，无则从磁盘加载，再无则创建新页）
@@ -338,13 +357,13 @@ public:
         auto key = std::make_pair(table_name, page_id);
         // 1. 检查缓存
         if (page_cache.count(key)) {
-            return std::shared_ptr<Page>(page_cache[key].get());
+            return std::shared_ptr<Page>(page_cache[key].get(), [](Page*){}); // 非拥有型shared_ptr，避免与unique_ptr重复释放
         }
         // 2. 从磁盘加载
         auto page = std::make_unique<Page>(page_id);
         if (page->load_from_disk(table_name)) {
             page_cache[key] = std::move(page);
-            return std::shared_ptr<Page>(page_cache[key].get());
+            return std::shared_ptr<Page>(page_cache[key].get(), [](Page*){});
         }
         // 3. 磁盘无此页（仅允许创建新页，不允许加载不存在的页）
         return nullptr;
@@ -357,7 +376,7 @@ public:
         auto key = std::make_pair(table_name, new_page_id);
         page_cache[key] = std::move(page);
         table_max_page_id[table_name] = new_page_id;
-        return std::shared_ptr<Page>(page_cache[key].get());
+        return std::shared_ptr<Page>(page_cache[key].get(), [](Page*){});
     }
 
     // 写入页到磁盘（脏页刷盘）
@@ -398,6 +417,97 @@ public:
         table_max_page_id[table_name] = max_id;
         return max_id;
     }
+
+    // 简化索引存在性判断：如果存在主键列，则认为有聚簇索引
+    bool has_index(const std::string& table_name) {
+        auto schema_opt = catalog.get_table_schema(table_name);
+        if (!schema_opt) return false;
+        for (const auto& col : schema_opt->columns) {
+            if (col.is_primary_key) return true;
+        }
+        return false;
+    }
+
+    // 暴露列名列表，便于 Python 侧加载表结构
+    std::vector<std::string> get_table_columns(const std::string& table_name) {
+        std::vector<std::string> cols;
+        auto schema_opt = catalog.get_table_schema(table_name);
+        if (!schema_opt) return cols;
+        for (const auto& col : schema_opt->columns) {
+            cols.push_back(col.name);
+        }
+        return cols;
+    }
+
+    // 调试：返回主键索引当前条目数量
+    size_t get_index_size(const std::string& table_name) const {
+        auto it = primary_indexes.find(table_name);
+        if (it == primary_indexes.end() || !it->second.enabled) return 0;
+        return it->second.pk_to_row_values.size();
+    }
+
+    // 初始化主键索引（根据表结构决定是否启用）
+    void init_primary_index(const TableSchema& schema) {
+        TableIndex idx;
+        idx.enabled = false;
+        idx.pk_index = 0;
+        for (size_t i = 0; i < schema.columns.size(); ++i) {
+            if (schema.columns[i].is_primary_key) {
+                idx.enabled = true;
+                idx.pk_index = i;
+                break;
+            }
+        }
+        primary_indexes[schema.name] = std::move(idx);
+        if (primary_indexes[schema.name].enabled) {
+            std::cout << "[CPP] init_primary_index enabled table=" << schema.name
+                      << " pk_idx=" << primary_indexes[schema.name].pk_index << std::endl;
+        } else {
+            std::cout << "[CPP] init_primary_index disabled table=" << schema.name << std::endl;
+        }
+    }
+
+    // 向主键索引写入一行（插入后调用）
+    void insert_index_row(const std::string& table_name, const std::vector<std::string>& row_values) {
+        auto it = primary_indexes.find(table_name);
+        if (it == primary_indexes.end()) return;
+        auto& idx = it->second;
+        if (!idx.enabled) return;
+        if (idx.pk_index >= row_values.size()) return;
+        const std::string& key = row_values[idx.pk_index];
+        idx.pk_to_row_values[key] = row_values;  // 覆盖式插入（主键唯一）
+        std::cout << "[CPP] index_insert table=" << table_name
+                  << " key=" << key << " size=" << idx.pk_to_row_values.size() << std::endl;
+    }
+
+    // 点查：返回行值（若存在）
+    std::optional<std::vector<std::string>> index_get_row_values(const std::string& table_name, const std::string& key) {
+        auto it = primary_indexes.find(table_name);
+        if (it == primary_indexes.end() || !it->second.enabled) return std::nullopt;
+        auto mit = it->second.pk_to_row_values.find(key);
+        std::cout << "[CPP] index_get table=" << table_name << " key=" << key
+                  << " found=" << (mit != it->second.pk_to_row_values.end()) << std::endl;
+        if (mit == it->second.pk_to_row_values.end()) return std::nullopt;
+        return mit->second;
+    }
+
+    // 范围查：返回[min_key, max_key] 闭区间内的所有行值
+    std::vector<std::vector<std::string>> index_range_row_values(
+        const std::string& table_name,
+        const std::string& min_key,
+        const std::string& max_key
+    ) {
+        std::vector<std::vector<std::string>> out;
+        auto it = primary_indexes.find(table_name);
+        if (it == primary_indexes.end() || !it->second.enabled) return out;
+        auto& m = it->second.pk_to_row_values;
+        for (auto iter = m.lower_bound(min_key); iter != m.end() && iter->first <= max_key; ++iter) {
+            out.push_back(iter->second);
+        }
+        std::cout << "[CPP] index_range table=" << table_name << " min=" << min_key
+                  << " max=" << max_key << " count=" << out.size() << std::endl;
+        return out;
+    }
 };
 
 // 8. 执行引擎：实现核心算子（CreateTable/Insert/SeqScan/Filter/Project）
@@ -414,7 +524,11 @@ public:
         if (table_name.empty() || columns.empty()) return false;
         // 注册到系统目录
         TableSchema schema(table_name, columns);
-        return storage.get_catalog().register_table(schema);
+        bool ok = storage.get_catalog().register_table(schema);
+        if (ok) {
+            storage.init_primary_index(schema);
+        }
+        return ok;
     }
 
     // 2. Insert算子：将Row写入存储引擎
@@ -432,14 +546,19 @@ public:
             auto page = storage.get_page(table_name, page_id);
             if (page && page->insert_row(row)) {
                 storage.write_page(table_name, page);
+                // 维护主键索引（内存）
+                storage.insert_index_row(table_name, row_values);
                 return true;
             }
+            if (page_id == 1) break; // 防止 size_t 下溢
         }
         
         // 3. 已有页无空间，创建新页写入
         auto new_page = storage.create_new_page(table_name);
         if (new_page->insert_row(row)) {
             storage.write_page(table_name, new_page);
+            // 维护主键索引（内存）
+            storage.insert_index_row(table_name, row_values);
             return true;
         }
         
@@ -540,6 +659,374 @@ public:
         }
         
         return deleted_count;
+    }
+
+    // 7. IndexScan（点查询，基于主键，简化版：回退为过滤）
+    std::shared_ptr<Row> index_scan(const std::string& table_name, const std::string& pk_value) {
+        auto vals_opt = storage.index_get_row_values(table_name, pk_value);
+        if (!vals_opt) return nullptr;
+        return std::make_shared<Row>(*vals_opt);
+    }
+
+    // 8. IndexRangeScan（范围查询，基于主键，简化版：线性过滤）
+    std::vector<std::shared_ptr<Row>> index_range_scan(
+        const std::string& table_name,
+        const std::string& min_pk,
+        const std::string& max_pk
+    ) {
+        std::vector<std::shared_ptr<Row>> results;
+        auto vecs = storage.index_range_row_values(table_name, min_pk, max_pk);
+        for (auto& vals : vecs) {
+            results.push_back(std::make_shared<Row>(vals));
+        }
+        return results;
+    }
+
+    // 9. Filter（条件下推，避免 Python 回调开销）
+    // conditions: 各元素为 (列索引, 操作符, 比较值)，AND 连接
+    std::vector<std::shared_ptr<Row>> filter_conditions(
+        const std::string& table_name,
+        const std::vector<std::tuple<int, std::string, std::string>>& conditions
+    ) {
+        auto all_rows = seq_scan(table_name);
+        if (conditions.empty()) return all_rows;
+
+        auto eval_cond = [](const std::string& lhs, const std::string& op, const std::string& rhs) -> bool {
+            auto to_num = [](const std::string& s, bool& ok) -> double {
+                try { ok = true; return std::stod(s); } catch (...) { ok = false; return 0.0; }
+            };
+            bool l_ok=false, r_ok=false; double lnum=to_num(lhs,l_ok), rnum=to_num(rhs,r_ok);
+            if (l_ok && r_ok) {
+                if (op == "=") return lnum == rnum;
+                if (op == ">") return lnum > rnum;
+                if (op == "<") return lnum < rnum;
+                if (op == ">=") return lnum >= rnum;
+                if (op == "<=") return lnum <= rnum;
+                if (op == "!=") return lnum != rnum;
+                return false;
+            }
+            if (op == "=") return lhs == rhs;
+            if (op == ">") return lhs > rhs;
+            if (op == "<") return lhs < rhs;
+            if (op == ">=") return lhs >= rhs;
+            if (op == "<=") return lhs <= rhs;
+            if (op == "!=") return lhs != rhs;
+            return false;
+        };
+
+        std::vector<std::shared_ptr<Row>> out;
+        out.reserve(all_rows.size());
+        for (const auto& row : all_rows) {
+            const auto& vals = row->get_values();
+            bool ok = true;
+            for (const auto& cond : conditions) {
+                int idx; std::string op; std::string rhs;
+                std::tie(idx, op, rhs) = cond;
+                if (idx < 0 || static_cast<size_t>(idx) >= vals.size()) { ok = false; break; }
+                if (!eval_cond(vals[static_cast<size_t>(idx)], op, rhs)) { ok = false; break; }
+            }
+            if (ok) out.push_back(row);
+        }
+        return out;
+    }
+
+    // 10. 批量插入（简单循环封装）
+    size_t insert_many(const std::string& table_name, const std::vector<std::vector<std::string>>& rows) {
+        size_t ok_count = 0;
+        for (const auto& r : rows) {
+            if (insert(table_name, r)) ok_count++;
+        }
+        return ok_count;
+    }
+
+    // 11. UPDATE算子：更新满足条件的行
+    size_t update_rows(
+        const std::string& table_name,
+        const std::vector<std::pair<std::string, std::string>>& set_clauses,  // 列名->新值
+        const std::function<bool(const std::vector<std::string>&)>& where_predicate
+    ) {
+        size_t updated_count = 0;
+        auto schema_opt = storage.get_catalog().get_table_schema(table_name);
+        if (!schema_opt) return 0;
+
+        // 获取列索引映射
+        std::map<std::string, size_t> col_name_to_idx;
+        for (size_t i = 0; i < schema_opt->columns.size(); ++i) {
+            col_name_to_idx[schema_opt->columns[i].name] = i;
+        }
+
+        // 遍历所有页，更新符合条件的行
+        size_t max_page_id = storage.get_table_max_page_id(table_name);
+        for (size_t page_id = 1; page_id <= max_page_id; page_id++) {
+            auto page = storage.get_page(table_name, page_id);
+            if (!page) continue;
+
+            auto page_rows = page->get_rows();
+            for (const auto& row : page_rows) {
+                if (where_predicate(row->get_values()) && !row->get_is_deleted()) {
+                    // 创建新行数据
+                    auto new_values = row->get_values();
+                    bool has_update = false;
+                    
+                    // 应用SET子句
+                    for (const auto& set_clause : set_clauses) {
+                        const std::string& col_name = set_clause.first;
+                        const std::string& new_value = set_clause.second;
+                        
+                        auto it = col_name_to_idx.find(col_name);
+                        if (it != col_name_to_idx.end()) {
+                            new_values[it->second] = new_value;
+                            has_update = true;
+                        }
+                    }
+                    
+                    if (has_update) {
+                        // 删除旧行，插入新行
+                        row->mark_deleted();
+                        Row new_row(new_values);
+                        if (page->insert_row(new_row)) {
+                            // 更新主键索引
+                            storage.insert_index_row(table_name, new_values);
+                            updated_count++;
+                        }
+                        page->set_dirty(true);
+                    }
+                }
+            }
+            
+            storage.write_page(table_name, page);
+        }
+        
+        return updated_count;
+    }
+
+    // 12. JOIN算子：内连接两个表
+    std::vector<std::vector<std::string>> inner_join(
+        const std::string& left_table,
+        const std::string& right_table,
+        const std::string& left_col,
+        const std::string& right_col
+    ) {
+        std::vector<std::vector<std::string>> result;
+        
+        // 获取表结构
+        auto left_schema = storage.get_catalog().get_table_schema(left_table);
+        auto right_schema = storage.get_catalog().get_table_schema(right_table);
+        if (!left_schema || !right_schema) return result;
+
+        // 获取连接列索引
+        auto left_col_idx = storage.get_catalog().get_column_index(left_table, left_col);
+        auto right_col_idx = storage.get_catalog().get_column_index(right_table, right_col);
+        if (!left_col_idx || !right_col_idx) return result;
+
+        // 扫描左表
+        auto left_rows = seq_scan(left_table);
+        
+        // 为右表建立哈希索引（简化实现）
+        std::map<std::string, std::vector<std::shared_ptr<Row>>> right_index;
+        auto right_rows = seq_scan(right_table);
+        for (const auto& right_row : right_rows) {
+            const auto& vals = right_row->get_values();
+            if (*right_col_idx < vals.size()) {
+                right_index[vals[*right_col_idx]].push_back(right_row);
+            }
+        }
+
+        // 执行连接
+        for (const auto& left_row : left_rows) {
+            const auto& left_vals = left_row->get_values();
+            if (*left_col_idx < left_vals.size()) {
+                const std::string& join_key = left_vals[*left_col_idx];
+                auto it = right_index.find(join_key);
+                if (it != right_index.end()) {
+                    // 找到匹配，生成连接结果
+                    for (const auto& right_row : it->second) {
+                        std::vector<std::string> joined_row;
+                        // 左表所有列
+                        joined_row.insert(joined_row.end(), left_vals.begin(), left_vals.end());
+                        // 右表所有列
+                        const auto& right_vals = right_row->get_values();
+                        joined_row.insert(joined_row.end(), right_vals.begin(), right_vals.end());
+                        result.push_back(joined_row);
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    // 13. ORDER BY算子：按指定列排序
+    std::vector<std::shared_ptr<Row>> order_by(
+        const std::string& table_name,
+        const std::vector<std::pair<std::string, bool>>& order_clauses  // 列名, ASC(true)/DESC(false)
+    ) {
+        auto rows = seq_scan(table_name);
+        if (order_clauses.empty()) return rows;
+
+        // 获取列索引
+        std::vector<std::pair<size_t, bool>> order_indices;  // 列索引, 升序标志
+        for (const auto& clause : order_clauses) {
+            auto col_idx = storage.get_catalog().get_column_index(table_name, clause.first);
+            if (col_idx) {
+                order_indices.push_back({*col_idx, clause.second});
+            }
+        }
+        if (order_indices.empty()) return rows;
+
+        // 排序比较函数
+        auto compare_rows = [&order_indices](const std::shared_ptr<Row>& a, const std::shared_ptr<Row>& b) -> bool {
+            const auto& vals_a = a->get_values();
+            const auto& vals_b = b->get_values();
+            
+            for (const auto& order_idx : order_indices) {
+                size_t col_idx = order_idx.first;
+                bool ascending = order_idx.second;
+                
+                if (col_idx >= vals_a.size() || col_idx >= vals_b.size()) continue;
+                
+                const std::string& val_a = vals_a[col_idx];
+                const std::string& val_b = vals_b[col_idx];
+                
+                // 尝试数值比较
+                bool a_is_num = false, b_is_num = false;
+                double num_a = 0.0, num_b = 0.0;
+                try {
+                    num_a = std::stod(val_a);
+                    a_is_num = true;
+                } catch (...) {}
+                try {
+                    num_b = std::stod(val_b);
+                    b_is_num = true;
+                } catch (...) {}
+                
+                if (a_is_num && b_is_num) {
+                    if (num_a != num_b) {
+                        return ascending ? (num_a < num_b) : (num_a > num_b);
+                    }
+                } else {
+                    if (val_a != val_b) {
+                        return ascending ? (val_a < val_b) : (val_a > val_b);
+                    }
+                }
+            }
+            return false;  // 相等
+        };
+
+        std::sort(rows.begin(), rows.end(), compare_rows);
+        return rows;
+    }
+
+    // 14. GROUP BY算子：分组聚合
+    struct GroupByResult {
+        std::vector<std::string> group_keys;  // 分组键值
+        std::map<std::string, double> aggregates;  // 聚合结果：函数名->值
+    };
+
+    std::vector<GroupByResult> group_by(
+        const std::string& table_name,
+        const std::vector<std::string>& group_columns,
+        const std::vector<std::pair<std::string, std::string>>& agg_functions  // 列名, 函数名(COUNT/SUM/AVG/MAX/MIN)
+    ) {
+        std::vector<GroupByResult> result;
+        auto rows = seq_scan(table_name);
+        if (rows.empty()) return result;
+
+        // 获取分组列索引
+        std::vector<size_t> group_indices;
+        for (const auto& col_name : group_columns) {
+            auto col_idx = storage.get_catalog().get_column_index(table_name, col_name);
+            if (col_idx) {
+                group_indices.push_back(*col_idx);
+            }
+        }
+
+        // 获取聚合列索引
+        std::vector<std::pair<size_t, std::string>> agg_indices;  // 列索引, 函数名
+        for (const auto& agg : agg_functions) {
+            auto col_idx = storage.get_catalog().get_column_index(table_name, agg.first);
+            if (col_idx) {
+                agg_indices.push_back({*col_idx, agg.second});
+            }
+        }
+
+        // 分组聚合
+        std::map<std::string, std::vector<std::shared_ptr<Row>>> groups;
+        
+        for (const auto& row : rows) {
+            const auto& vals = row->get_values();
+            
+            // 构建分组键
+            std::string group_key;
+            for (size_t i = 0; i < group_indices.size(); ++i) {
+                if (i > 0) group_key += "|";
+                if (group_indices[i] < vals.size()) {
+                    group_key += vals[group_indices[i]];
+                }
+            }
+            
+            groups[group_key].push_back(row);
+        }
+
+        // 计算每个组的聚合值
+        for (const auto& group : groups) {
+            GroupByResult group_result;
+            group_result.group_keys = group_columns;
+            
+            // 设置分组键值
+            std::vector<std::string> key_parts;
+            size_t pos = 0;
+            for (size_t i = 0; i < group_columns.size(); ++i) {
+                size_t next_pos = group.first.find('|', pos);
+                if (next_pos == std::string::npos) next_pos = group.first.length();
+                key_parts.push_back(group.first.substr(pos, next_pos - pos));
+                pos = next_pos + 1;
+            }
+            group_result.group_keys = key_parts;
+
+            // 计算聚合函数
+            for (const auto& agg_idx : agg_indices) {
+                size_t col_idx = agg_idx.first;
+                const std::string& func_name = agg_idx.second;
+                
+                if (func_name == "COUNT") {
+                    group_result.aggregates[func_name] = static_cast<double>(group.second.size());
+                } else {
+                    // 数值聚合
+                    std::vector<double> values;
+                    for (const auto& row : group.second) {
+                        const auto& vals = row->get_values();
+                        if (col_idx < vals.size()) {
+                            try {
+                                values.push_back(std::stod(vals[col_idx]));
+                            } catch (...) {
+                                // 忽略非数值
+                            }
+                        }
+                    }
+                    
+                    if (!values.empty()) {
+                        if (func_name == "SUM") {
+                            double sum = 0.0;
+                            for (double v : values) sum += v;
+                            group_result.aggregates[func_name] = sum;
+                        } else if (func_name == "AVG") {
+                            double sum = 0.0;
+                            for (double v : values) sum += v;
+                            group_result.aggregates[func_name] = sum / values.size();
+                        } else if (func_name == "MAX") {
+                            group_result.aggregates[func_name] = *std::max_element(values.begin(), values.end());
+                        } else if (func_name == "MIN") {
+                            group_result.aggregates[func_name] = *std::min_element(values.begin(), values.end());
+                        }
+                    }
+                }
+            }
+            
+            result.push_back(group_result);
+        }
+        
+        return result;
     }
 };
 

@@ -235,12 +235,35 @@ class SemanticAnalyzer:
         if left and not self.catalog.has_column(table_name, left.value):
             raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
 
-        if left:
+        # 检查右侧值是否为列名（如果不是常量的话）
+        if right and right.value:
+            right_value = str(right.value)
+            # 如果是数字，不需要检查
+            if right_value.replace(".", "").isdigit():
+                pass  # 数字常量，跳过检查
+            # 如果是字符串常量（词法分析器已经去掉了引号），不需要检查
+            # 这里我们假设非数字的CONST都是字符串常量
+            else:
+                # 检查是否真的是列名
+                if self.catalog.has_column(table_name, right.value):
+                    # 如果确实是列名，则允许
+                    pass
+                else:
+                    # 如果不是列名，则认为是字符串常量，跳过检查
+                    pass
+
+        if left and right:
             expected_type = self.catalog.get_column_type(table_name, left.value)
-            if expected_type == "INT" and not str(right.value).isdigit():
+            right_value = str(right.value)
+            
+            # 处理字符串常量（去除引号）
+            if right_value.startswith("'") and right_value.endswith("'"):
+                right_value = right_value[1:-1]
+            
+            if expected_type == "INT" and not right_value.replace(".", "").isdigit():
                 raise SemanticError("TypeError", left.value, f"期望 INT, 但 WHERE 得到 {right.value}")
-            if expected_type == "VARCHAR" and isinstance(right.value, int):
-                raise SemanticError("TypeError", left.value, f"期望 VARCHAR, 但 WHERE 得到 {right.value}")
+            if expected_type in ["STRING", "VARCHAR"] and right_value.replace(".", "").isdigit():
+                raise SemanticError("TypeError", left.value, f"期望 STRING, 但 WHERE 得到 {right.value}")
 
     def _check_update(self, ast):
         table_name = ast.value
@@ -315,8 +338,18 @@ class SemanticAnalyzer:
         
         # right 通常是常量，不需要检查表中是否存在
         # 但如果 right 也是列名，则需要检查
-        if right and right.value and not str(right.value).replace(".", "").replace("'", "").isdigit():
-            # 如果 right 不是数字也不是字符串常量，可能是列名
-            if '.' in str(right.value) or not str(right.value).startswith("'"):
-                if not self._column_exists_in_tables(tables, right.value):
-                    raise SemanticError("ColumnError", right.value, "WHERE 子句中的右侧列不存在")
+        if right and right.value:
+            right_value = str(right.value)
+            # 如果是数字，不需要检查
+            if right_value.replace(".", "").isdigit():
+                pass  # 数字常量，跳过检查
+            # 如果是字符串常量（词法分析器已经去掉了引号），不需要检查
+            # 这里我们假设非数字的CONST都是字符串常量
+            else:
+                # 检查是否真的是列名
+                if self._column_exists_in_tables(tables, right.value):
+                    # 如果确实是列名，则允许
+                    pass
+                else:
+                    # 如果不是列名，则认为是字符串常量，跳过检查
+                    pass

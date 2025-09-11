@@ -1,3 +1,63 @@
+# 快速使用（C++ 执行引擎 + Python 上层）
+
+本节给出最小可复现步骤，覆盖构建、清理、批量插入与下推过滤/索引点查。
+
+## 1) 构建 C++ 扩展
+
+在 PowerShell 中执行：
+
+```
+cd cpp_core
+python setup.py build_ext --inplace
+cd ..
+Copy-Item cpp_core\build\lib.win-amd64-3.10\db_core.cp310-win_amd64.pyd . -Force
+```
+
+如使用虚拟环境，请先激活 venv 再执行。
+
+## 2) 可选：清理旧数据（重置环境）
+
+```
+Remove-Item -ErrorAction SilentlyContinue -Force sys_catalog_page_0.bin
+Get-ChildItem -Filter '*_page_*.bin' | Remove-Item -Force -ErrorAction SilentlyContinue
+```
+
+## 3) 最小验证（SQL → 解析 → 优化 → 执行）
+
+以下命令均在项目根目录执行（注意把项目根加入 sys.path）：
+
+```
+# 创建表（4 列，主键 id）
+python -c "import sys; sys.path.insert(0, r'D:\大三上\数据库系统'); from src.api.db_api import DatabaseAPI; db=DatabaseAPI(); print('CREATE', db.execute('CREATE TABLE t2(id INT PRIMARY KEY, name STRING, age INT, score DOUBLE)'))"
+
+# 批量插入（5 行）
+python -c "import sys; sys.path.insert(0, r'D:\大三上\数据库系统'); from src.api.db_api import DatabaseAPI; db=DatabaseAPI(); eng=db._runner; rows=[[str(i), f'Name{i}', str(18+i), str(80.0+i)] for i in range(1,6)]; print('INSERT_MANY', eng.insert_many('t2', rows))"
+
+# 下推过滤（WHERE id >= 2 AND id <= 4），仅返回 name,score 两列
+python -c "import sys; sys.path.insert(0, r'D:\大三上\数据库系统'); from src.api.db_api import DatabaseAPI; db=DatabaseAPI(); print('SELECT_PUSH', db.execute('SELECT name,score FROM t2 WHERE id >= 2 AND id <= 4'))"
+
+# 主键点查（命中索引或自动回退顺扫）
+python -c "import sys; sys.path.insert(0, r'D:\大三上\数据库系统'); from src.api.db_api import DatabaseAPI; db=DatabaseAPI(); print('SELECT_PK3', db.execute('SELECT id,name FROM t2 WHERE id = 3'))"
+```
+
+预期：
+- INSERT_MANY 输出 5；
+- SELECT_PUSH 返回 3 行；
+- SELECT_PK3 返回 [["3","Name3"]]。
+
+## 4) 说明与排错
+
+- 若报导入 Flask/Werkzeug 相关错误，是因为纯本地模式无需 REST，请仅从 `src.api.db_api` 导入 `DatabaseAPI`；`src/api/__init__.py` 已调整默认不导入 REST。
+- 若 `filter()` 回调报类型不匹配，执行器会自动回退为 Python 侧过滤；也可通过 `filter_conditions` 下推条件避免回调开销（已在执行器中自动尝试）。
+- 若点查未命中但返回结果不为空，说明已自动回退顺扫+过滤；这不影响功能正确性。
+
+## 5) 常见接口
+
+- CreateTable：`db.execute('CREATE TABLE t(id INT PRIMARY KEY, name STRING, ...)')`
+- Insert：`db.execute("INSERT INTO t VALUES (1,'Alice',20,95.5)")` 或批量 `db._runner.insert_many('t', rows)`
+- Select（顺扫/索引 + 过滤/投影）：`db.execute('SELECT id,name FROM t WHERE id = 1')`
+- Flush：`db.flush()`（主动刷脏页）
+
 # 混合架构数据库系统使用说明
 
 ## 系统概述

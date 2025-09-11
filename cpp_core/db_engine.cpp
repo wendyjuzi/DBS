@@ -29,7 +29,10 @@ PYBIND11_MODULE(db_core, m) {
     // 4. 绑定StorageEngine类
     py::class_<StorageEngine>(m, "StorageEngine")
         .def(py::init<>())
-        .def("flush_all_dirty_pages", &StorageEngine::flush_all_dirty_pages);
+        .def("flush_all_dirty_pages", &StorageEngine::flush_all_dirty_pages)
+        .def("has_index", &StorageEngine::has_index)
+        .def("get_table_columns", &StorageEngine::get_table_columns)
+        .def("get_index_size", &StorageEngine::get_index_size);
 
     // 5. 绑定ExecutionEngine类（核心接口）
     py::class_<ExecutionEngine>(m, "ExecutionEngine")
@@ -50,5 +53,29 @@ PYBIND11_MODULE(db_core, m) {
              py::arg("table_name"), py::arg("input_rows"), py::arg("target_columns"))
         // Delete：返回删除行数
         .def("delete_rows", &ExecutionEngine::delete_rows, 
-             py::arg("table_name"), py::arg("predicate"));
+             py::arg("table_name"), py::arg("predicate"))
+        // Index 接口（简化版）
+        .def("index_scan", &ExecutionEngine::index_scan, 
+             py::arg("table_name"), py::arg("pk_value"))
+        .def("index_range_scan", &ExecutionEngine::index_range_scan, 
+             py::arg("table_name"), py::arg("min_pk"), py::arg("max_pk"))
+        // 额外接口：下推过滤与批量插入（合并到同一个定义链，避免重复定义类）
+        .def("filter_conditions", &ExecutionEngine::filter_conditions,
+             py::arg("table_name"), py::arg("conditions"))
+        .def("insert_many", &ExecutionEngine::insert_many,
+             py::arg("table_name"), py::arg("rows"))
+        // 新增功能：UPDATE、JOIN、ORDER BY、GROUP BY
+        .def("update_rows", &ExecutionEngine::update_rows,
+             py::arg("table_name"), py::arg("set_clauses"), py::arg("where_predicate"))
+        .def("inner_join", &ExecutionEngine::inner_join,
+             py::arg("left_table"), py::arg("right_table"), py::arg("left_col"), py::arg("right_col"))
+        .def("order_by", &ExecutionEngine::order_by,
+             py::arg("table_name"), py::arg("order_clauses"))
+        .def("group_by", &ExecutionEngine::group_by,
+             py::arg("table_name"), py::arg("group_columns"), py::arg("agg_functions"));
+
+    // 绑定GroupByResult结构体
+    py::class_<ExecutionEngine::GroupByResult>(m, "GroupByResult")
+        .def_readonly("group_keys", &ExecutionEngine::GroupByResult::group_keys)
+        .def_readonly("aggregates", &ExecutionEngine::GroupByResult::aggregates);
 }
