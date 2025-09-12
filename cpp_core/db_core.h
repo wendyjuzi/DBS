@@ -365,6 +365,18 @@ private:
     };
     std::map<std::string, TableIndex> primary_indexes;
 
+    // 复合索引（内存版，雏形）：表名 → { 启用标志, 参与列下标序列, 有序映射compositeKey→整行值 }
+    struct CompositeIndexInfo {
+        bool enabled = false;
+        std::vector<size_t> key_indices;  // 参与复合键的列下标，按顺序
+        std::map<std::string, std::vector<std::string>> key_to_row_values;
+        // 简易持久化文件路径
+        std::string meta_path;  // table_cidx.meta
+        std::string data_path;  // table_cidx.bin
+        std::string wal_path;   // table_cidx.wal
+    };
+    std::map<std::string, CompositeIndexInfo> composite_indexes;
+
 public:
     StorageEngine() {
         // 初始化表的最大页ID（从磁盘读取已存在的页）
@@ -388,6 +400,8 @@ public:
             if (schema_opt) {
                 init_primary_index(*schema_opt);
             }
+            // 加载复合索引（如果存在）
+            try { load_composite_index_if_exists(table_name); } catch (...) {}
         }
     }
 
@@ -504,6 +518,8 @@ public:
         } else {
             std::cout << "[CPP] init_primary_index disabled table=" << schema.name << std::endl;
         }
+        // 默认复合索引未启用
+        composite_indexes.erase(schema.name);
     }
 
     // 向主键索引写入一行（插入后调用）
@@ -517,6 +533,26 @@ public:
         idx.pk_to_row_values[key] = row_values;  // 覆盖式插入（主键唯一）
         std::cout << "[CPP] index_insert table=" << table_name
                   << " key=" << key << " size=" << idx.pk_to_row_values.size() << std::endl;
+
+        // 同步维护复合索引（若存在）
+        auto cit = composite_indexes.find(table_name);
+        if (cit != composite_indexes.end() && cit->second.enabled) {
+            const auto& indices = cit->second.key_indices;
+            if (!indices.empty()) {
+                std::string ckey;
+                for (size_t i = 0; i < indices.size(); ++i) {
+                    size_t col_idx = indices[i];
+                    if (col_idx >= row_values.size()) { ckey.clear(); break; }
+                    if (i > 0) ckey.push_back('\x1F'); // 使用不可见分隔符
+                    ckey += row_values[col_idx];
+                }
+                if (!ckey.empty()) {
+                    cit->second.key_to_row_values[ckey] = row_values;
+                    // 追加WAL
+                    append_cidx_wal(table_name, ckey, row_values);
+                }
+            }
+        }
     }
 
     // 点查：返回行值（若存在）
@@ -546,6 +582,187 @@ public:
         std::cout << "[CPP] index_range table=" << table_name << " min=" << min_key
                   << " max=" << max_key << " count=" << out.size() << std::endl;
         return out;
+    }
+
+    // 启用复合索引（内存版，雏形）。indices 为参与列下标序列。
+    bool enable_composite_index(const std::string& table_name, const std::vector<size_t>& indices) {
+        if (indices.empty()) return false;
+        CompositeIndexInfo info;
+        info.enabled = true;
+        info.key_indices = indices;
+        info.meta_path = table_name + "_cidx.meta";
+        info.data_path = table_name + "_cidx.bin";
+        info.wal_path  = table_name + "_cidx.wal";
+        composite_indexes[table_name] = std::move(info);
+        // 回填历史数据并落盘快照
+        rebuild_and_save_composite_index(table_name);
+        std::cout << "[CPP] composite index enabled table=" << table_name << " cols=" << indices.size() << std::endl;
+        return true;
+    }
+
+    // 复合索引点查
+    std::optional<std::vector<std::string>> composite_index_get_row_values(const std::string& table_name, const std::string& composite_key) {
+        auto it = composite_indexes.find(table_name);
+        if (it == composite_indexes.end() || !it->second.enabled) return std::nullopt;
+        auto mit = it->second.key_to_row_values.find(composite_key);
+        if (mit == it->second.key_to_row_values.end()) return std::nullopt;
+        return mit->second;
+    }
+
+    // 复合索引范围查（字典序）
+    std::vector<std::vector<std::string>> composite_index_range_row_values(
+        const std::string& table_name,
+        const std::string& min_key,
+        const std::string& max_key
+    ) {
+        std::vector<std::vector<std::string>> out;
+        auto it = composite_indexes.find(table_name);
+        if (it == composite_indexes.end() || !it->second.enabled) return out;
+        auto& m = it->second.key_to_row_values;
+        for (auto iter = m.lower_bound(min_key); iter != m.end() && iter->first <= max_key; ++iter) {
+            out.push_back(iter->second);
+        }
+        return out;
+    }
+
+    // Drop复合索引：内存清理并删除持久化文件
+    bool drop_composite_index(const std::string& table_name) {
+        auto it = composite_indexes.find(table_name);
+        if (it == composite_indexes.end()) return false;
+        auto meta = it->second.meta_path; auto data = it->second.data_path; auto wal = it->second.wal_path;
+        composite_indexes.erase(it);
+        if (!meta.empty()) std::remove(meta.c_str());
+        if (!data.empty()) std::remove(data.c_str());
+        if (!wal.empty()) std::remove(wal.c_str());
+        std::cout << "[CPP] composite index dropped table=" << table_name << std::endl;
+        return true;
+    }
+
+    // 展示复合索引信息
+    std::vector<size_t> get_composite_index_columns(const std::string& table_name) const {
+        auto it = composite_indexes.find(table_name);
+        if (it == composite_indexes.end() || !it->second.enabled) return {};
+        return it->second.key_indices;
+    }
+
+private:
+    void load_composite_index_if_exists(const std::string& table_name) {
+        std::string meta = table_name + "_cidx.meta";
+        if (!std::ifstream(meta).good()) return;
+        CompositeIndexInfo info; info.enabled = true; info.meta_path = meta;
+        info.data_path = table_name + "_cidx.bin"; info.wal_path = table_name + "_cidx.wal";
+        // 读取列下标
+        std::ifstream mf(meta);
+        std::string line; if (std::getline(mf, line)) {
+            info.key_indices.clear();
+            size_t pos = 0; while (pos < line.size()) {
+                size_t comma = line.find(',', pos);
+                std::string tok = line.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                if (!tok.empty()) info.key_indices.push_back(static_cast<size_t>(std::stoul(tok)));
+                if (comma == std::string::npos) break; pos = comma + 1;
+            }
+        }
+        // 读取快照
+        std::ifstream df(info.data_path, std::ios::binary);
+        if (df.good()) {
+            std::string k; size_t nvals = 0;
+            while (true) {
+                uint32_t klen = 0; if (!df.read(reinterpret_cast<char*>(&klen), sizeof(klen))) break;
+                k.resize(klen); if (!df.read(&k[0], klen)) break;
+                uint32_t cnt = 0; if (!df.read(reinterpret_cast<char*>(&cnt), sizeof(cnt))) break; nvals = cnt;
+                std::vector<std::string> vals; vals.reserve(nvals);
+                for (uint32_t i = 0; i < cnt; ++i) {
+                    uint32_t sl = 0; if (!df.read(reinterpret_cast<char*>(&sl), sizeof(sl))) { vals.clear(); break; }
+                    std::string s; s.resize(sl); if (!df.read(&s[0], sl)) { vals.clear(); break; }
+                    vals.push_back(std::move(s));
+                }
+                if (!vals.empty()) info.key_to_row_values[k] = std::move(vals);
+            }
+        }
+        // 回放WAL
+        replay_cidx_wal(table_name, info);
+        composite_indexes[table_name] = std::move(info);
+    }
+
+    void rebuild_and_save_composite_index(const std::string& table_name) {
+        auto it = composite_indexes.find(table_name);
+        if (it == composite_indexes.end()) return;
+        auto& info = it->second;
+        info.key_to_row_values.clear();
+        // 以主键索引为基础回填
+        auto pit = primary_indexes.find(table_name);
+        if (pit != primary_indexes.end() && pit->second.enabled) {
+            for (const auto& kv : pit->second.pk_to_row_values) {
+                const auto& row_values = kv.second;
+                std::string ckey;
+                for (size_t i = 0; i < info.key_indices.size(); ++i) {
+                    size_t col_idx = info.key_indices[i];
+                    if (col_idx >= row_values.size()) { ckey.clear(); break; }
+                    if (i > 0) ckey.push_back('\x1F');
+                    ckey += row_values[col_idx];
+                }
+                if (!ckey.empty()) info.key_to_row_values[ckey] = row_values;
+            }
+        }
+        save_cidx_snapshot(table_name, info);
+        // 清空旧WAL
+        if (!info.wal_path.empty()) std::remove(info.wal_path.c_str());
+        // 保存meta
+        std::ofstream mf(info.meta_path, std::ios::trunc);
+        for (size_t i = 0; i < info.key_indices.size(); ++i) {
+            if (i) mf << ",";
+            mf << info.key_indices[i];
+        }
+    }
+
+    void save_cidx_snapshot(const std::string& table_name, const CompositeIndexInfo& info) {
+        std::ofstream df(info.data_path, std::ios::binary | std::ios::trunc);
+        for (const auto& kv : info.key_to_row_values) {
+            const std::string& k = kv.first; const auto& vals = kv.second;
+            uint32_t klen = static_cast<uint32_t>(k.size());
+            df.write(reinterpret_cast<const char*>(&klen), sizeof(klen));
+            df.write(k.data(), k.size());
+            uint32_t cnt = static_cast<uint32_t>(vals.size());
+            df.write(reinterpret_cast<const char*>(&cnt), sizeof(cnt));
+            for (const auto& s : vals) {
+                uint32_t sl = static_cast<uint32_t>(s.size());
+                df.write(reinterpret_cast<const char*>(&sl), sizeof(sl));
+                df.write(s.data(), s.size());
+            }
+        }
+    }
+
+    void append_cidx_wal(const std::string& table_name, const std::string& key, const std::vector<std::string>& vals) {
+        auto it = composite_indexes.find(table_name); if (it == composite_indexes.end()) return;
+        const auto& info = it->second; if (info.wal_path.empty()) return;
+        std::ofstream wf(info.wal_path, std::ios::binary | std::ios::app);
+        uint32_t klen = static_cast<uint32_t>(key.size());
+        wf.write(reinterpret_cast<const char*>(&klen), sizeof(klen));
+        wf.write(key.data(), key.size());
+        uint32_t cnt = static_cast<uint32_t>(vals.size());
+        wf.write(reinterpret_cast<const char*>(&cnt), sizeof(cnt));
+        for (const auto& s : vals) {
+            uint32_t sl = static_cast<uint32_t>(s.size());
+            wf.write(reinterpret_cast<const char*>(&sl), sizeof(sl));
+            wf.write(s.data(), s.size());
+        }
+    }
+
+    void replay_cidx_wal(const std::string& table_name, CompositeIndexInfo& info) {
+        std::ifstream wf(info.wal_path, std::ios::binary);
+        if (!wf.good()) return;
+        while (true) {
+            uint32_t klen = 0; if (!wf.read(reinterpret_cast<char*>(&klen), sizeof(klen))) break;
+            std::string key; key.resize(klen); if (!wf.read(&key[0], klen)) break;
+            uint32_t cnt = 0; if (!wf.read(reinterpret_cast<char*>(&cnt), sizeof(cnt))) break;
+            std::vector<std::string> vals; vals.reserve(cnt);
+            for (uint32_t i = 0; i < cnt; ++i) {
+                uint32_t sl = 0; if (!wf.read(reinterpret_cast<char*>(&sl), sizeof(sl))) { vals.clear(); break; }
+                std::string s; s.resize(sl); if (!wf.read(&s[0], sl)) { vals.clear(); break; }
+                vals.push_back(std::move(s));
+            }
+            if (!vals.empty()) info.key_to_row_values[key] = std::move(vals);
+        }
     }
 
     // 删除表的所有数据文件（DROP TABLE时调用）
@@ -761,6 +978,20 @@ public:
         return results;
     }
 
+    // 8b. CompositeIndexRangeScan（范围查询，基于复合键，内存雏形）
+    std::vector<std::shared_ptr<Row>> composite_index_range_scan(
+        const std::string& table_name,
+        const std::string& min_key,
+        const std::string& max_key
+    ) {
+        std::vector<std::shared_ptr<Row>> results;
+        auto vecs = storage.composite_index_range_row_values(table_name, min_key, max_key);
+        for (auto& vals : vecs) {
+            results.push_back(std::make_shared<Row>(vals));
+        }
+        return results;
+    }
+
     // 9. Filter（条件下推，避免 Python 回调开销）
     // conditions: 各元素为 (列索引, 操作符, 比较值)，AND 连接
     std::vector<std::shared_ptr<Row>> filter_conditions(
@@ -932,6 +1163,67 @@ public:
             }
         }
         
+        return result;
+    }
+
+    // 12b. MERGE JOIN（基于排序的内连接，适用于已排序或可排序的中等规模数据）
+    std::vector<std::vector<std::string>> merge_join(
+        const std::string& left_table,
+        const std::string& right_table,
+        const std::string& left_col,
+        const std::string& right_col
+    ) {
+        std::vector<std::vector<std::string>> result;
+        // 获取列索引
+        auto lidx_opt = storage.get_catalog().get_column_index(left_table, left_col);
+        auto ridx_opt = storage.get_catalog().get_column_index(right_table, right_col);
+        if (!lidx_opt || !ridx_opt) return result;
+        size_t lidx = *lidx_opt, ridx = *ridx_opt;
+        // 扫描两表
+        auto lrows = seq_scan(left_table);
+        auto rrows = seq_scan(right_table);
+        // 提取键并排序
+        auto key_of = [](const std::shared_ptr<Row>& r, size_t idx)->std::string {
+            const auto& v = r->get_values(); return idx < v.size() ? v[idx] : std::string();
+        };
+        std::sort(lrows.begin(), lrows.end(), [&](const std::shared_ptr<Row>& a, const std::shared_ptr<Row>& b){
+            return key_of(a, lidx) < key_of(b, lidx);
+        });
+        std::sort(rrows.begin(), rrows.end(), [&](const std::shared_ptr<Row>& a, const std::shared_ptr<Row>& b){
+            return key_of(a, ridx) < key_of(b, ridx);
+        });
+        // 归并连接（处理重复键）
+        size_t i = 0, j = 0;
+        while (i < lrows.size() && j < rrows.size()) {
+            const auto& lv = lrows[i]->get_values();
+            const auto& rv = rrows[j]->get_values();
+            std::string lk = lidx < lv.size() ? lv[lidx] : std::string();
+            std::string rk = ridx < rv.size() ? rv[ridx] : std::string();
+            if (lk < rk) { ++i; continue; }
+            if (rk < lk) { ++j; continue; }
+            // 相等：收集相同键的区间
+            size_t i2 = i; while (i2 < lrows.size()) {
+                const auto& lv2 = lrows[i2]->get_values();
+                std::string k2 = lidx < lv2.size() ? lv2[lidx] : std::string();
+                if (k2 != lk) break; ++i2;
+            }
+            size_t j2 = j; while (j2 < rrows.size()) {
+                const auto& rv2 = rrows[j2]->get_values();
+                std::string k2 = ridx < rv2.size() ? rv2[ridx] : std::string();
+                if (k2 != rk) break; ++j2;
+            }
+            for (size_t a = i; a < i2; ++a) {
+                const auto& la = lrows[a]->get_values();
+                for (size_t b = j; b < j2; ++b) {
+                    const auto& rb = rrows[b]->get_values();
+                    std::vector<std::string> joined; joined.reserve(la.size()+rb.size());
+                    joined.insert(joined.end(), la.begin(), la.end());
+                    joined.insert(joined.end(), rb.begin(), rb.end());
+                    result.push_back(std::move(joined));
+                }
+            }
+            i = i2; j = j2;
+        }
         return result;
     }
 

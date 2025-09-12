@@ -4,6 +4,10 @@
 
 import time
 from typing import Any, Dict, List, Optional, Callable, Tuple
+from ...utils.transaction import TransactionManager
+from ...utils.wal import WALManager, LogRecord
+from ...utils.logging import get_logger
+from ...index.index_manager import IndexManager
 from ...utils.exceptions import ExecutionError, CatalogError
 
 
@@ -14,6 +18,13 @@ class HybridExecutionEngine:
         self.storage = cpp_storage_engine
         self.executor = cpp_execution_engine
         self.table_columns = {}
+        # 简易 WAL + 事务
+        self._wal = WALManager()
+        self._txm = TransactionManager(self._wal)
+        self._current_txid: Optional[str] = None
+        # 多列二级索引管理（内存）
+        self.index_manager = IndexManager()
+        self._logger = get_logger("executor")
 
     def insert_many(self, table: str, rows: List[List[str]]) -> int:
         if table not in self.table_columns:
@@ -130,9 +141,20 @@ class HybridExecutionEngine:
         expected_cols = len(self.table_columns[table_name])
         if len(values) != expected_cols:
             raise ExecutionError(f"列数不匹配，期望 {expected_cols} 列，实际 {len(values)} 列")
+        # 事务与日志
+        txid = self._current_txid or self._txm.begin().txid
+        is_implicit_tx = self._current_txid is None
+        self._wal.append(LogRecord(txid=txid, op="INSERT", table=table_name, payload={"values": values}))
         success = self.executor.insert(table_name, values)
         print(f"[EXEC] INSERT 调用C++返回: {success}")
         if success:
+            # 维护二级索引
+            try:
+                self.index_manager.on_insert(table_name, values, self.table_columns[table_name])
+            except Exception:
+                pass
+            if is_implicit_tx:
+                self._txm.commit(txid)
             return {"affected_rows": 1}
         raise ExecutionError("插入失败（行数据过大或存储空间不足）")
 
@@ -178,6 +200,35 @@ class HybridExecutionEngine:
                 col = cond.get("column"); op = cond.get("op"); val = str(cond.get("value"))
                 if col in self.table_columns[table_name]:
                     pushdown.append((self.table_columns[table_name].index(col), op, val))
+        # 尝试使用内存二级索引加速：等值或范围
+        if filter_conditions:
+            try:
+                # 优先使用等值条件
+                for cond in filter_conditions:
+                    col = cond.get("column"); op = (cond.get("op") or "").strip(); val = str(cond.get("value"))
+                    if op == "=" and self.index_manager.has_index(table_name, col):
+                        pks = self.index_manager.lookup_pks(table_name, col, val)
+                        if pks:
+                            return self.select_by_pk_values(table_name, target_columns, pks)
+                # 尝试范围条件（需要相同列上的单个范围）
+                rng_col = None; min_v = None; max_v = None; inc_min = True; inc_max = True
+                for cond in filter_conditions:
+                    col = cond.get("column"); op = (cond.get("op") or "").strip(); val = str(cond.get("value"))
+                    if not self.index_manager.has_index(table_name, col):
+                        continue
+                    if rng_col and col != rng_col:
+                        continue
+                    rng_col = col
+                    if op in (">", ">="):
+                        min_v = val; inc_min = (op == ">=")
+                    elif op in ("<", "<="):
+                        max_v = val; inc_max = (op == "<=")
+                if rng_col and (min_v is not None or max_v is not None):
+                    pks = self.index_manager.range_lookup_pks(table_name, rng_col, min_v, max_v, inc_min, inc_max)
+                    if pks:
+                        return self.select_by_pk_values(table_name, target_columns, pks)
+            except Exception:
+                pass
         # 选择路径
         if access_method and getattr(access_method, "value", access_method) in ("index_scan", "index_range_scan"):
             rows = []
@@ -259,6 +310,29 @@ class HybridExecutionEngine:
             if ok: out.append(r)
         return out
 
+    def select_by_pk_values(self, table_name: str, target_columns: List[str], pk_values: List[str]) -> Dict[str, Any]:
+        """基于主键集合的批量点查并投影，用于索引范围命中后的快速回表。"""
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        if table_name not in self.table_columns:
+            raise CatalogError(f"表 '{table_name}' 不存在")
+        if target_columns == ["*"]:
+            target_columns = self.table_columns[table_name]
+        rows = []
+        for pk in pk_values:
+            try:
+                r = self.executor.index_scan(table_name, str(pk))
+                if r:
+                    rows.append(r)
+            except Exception:
+                # 任意单个失败跳过，不影响其它主键
+                continue
+        try:
+            projected_data = self.executor.project(table_name, rows, target_columns)
+        except Exception:
+            projected_data = [r.get_values() for r in rows]
+        return {"data": projected_data, "affected_rows": len(projected_data), "metadata": {"columns": target_columns}}
+
     def _execute_delete(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         table_name = plan["table"]
         where_clause = plan.get("where")
@@ -267,7 +341,41 @@ class HybridExecutionEngine:
         if table_name not in self.table_columns:
             raise CatalogError(f"表 '{table_name}' 不存在")
         predicate = self._build_predicate(table_name, where_clause)
-        deleted_count = self.executor.delete_rows(table_name, predicate)
+        # 简化：逐行扫描找主键以维护索引与记录 WAL
+        txid = self._current_txid or self._txm.begin().txid
+        is_implicit_tx = self._current_txid is None
+        deleted_count = 0
+        # 需要列名与主键列
+        col_names = self.table_columns.get(table_name, [])
+        pk_col = None
+        for name in col_names:
+            # 简化：约定第一个名为 id 的为主键，或优化器/存储可提供主键信息
+            if name.lower() in ("id", "pk", "primary", "primary_key"):
+                pk_col = name
+                break
+        # 无法确认主键时直接调用 C++ 删除
+        if pk_col is None:
+            self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"where": where_clause}))
+            deleted_count = self.executor.delete_rows(table_name, predicate)
+        else:
+            # 扫描并按谓词删除，维护索引
+            for r in self.executor.seq_scan(table_name):
+                vals = r.get_values()
+                try:
+                    if predicate(vals):
+                        pk_value = vals[col_names.index(pk_col)]
+                        self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"pk": pk_value}))
+                        if self.executor.delete_row_by_pk:
+                            self.executor.delete_row_by_pk(table_name, str(pk_value))
+                        else:
+                            # 回退到批量删除
+                            pass
+                        self.index_manager.on_delete(table_name, str(pk_value))
+                        deleted_count += 1
+                except Exception:
+                    continue
+        if is_implicit_tx:
+            self._txm.commit(txid)
         return {"affected_rows": deleted_count, "metadata": {"message": f"删除了 {deleted_count} 行"}}
 
     def _build_predicate(self, table_name: str, where_clause: Optional[str]) -> Callable[[List[str]], bool]:
@@ -302,12 +410,48 @@ class HybridExecutionEngine:
         predicate = self._build_predicate(table_name, where_clause)
         
         # 调用C++ UPDATE算子
+        # 简化：记录 WAL，调用底层更新，无法轻易提取旧值时跳过索引维护
+        txid = self._current_txid or self._txm.begin().txid
+        is_implicit_tx = self._current_txid is None
+        self._wal.append(LogRecord(txid=txid, op="UPDATE", table=table_name, payload={"set": set_clauses, "where": where_clause}))
         updated_count = self.executor.update_rows(table_name, set_clauses, predicate)
+        if is_implicit_tx:
+            self._txm.commit(txid)
         
         return {
             "affected_rows": updated_count,
             "metadata": {"message": f"更新了 {updated_count} 行"}
         }
+
+    # --- 事务 API ---
+    def begin(self) -> str:
+        if self._current_txid:
+            return self._current_txid
+        txn = self._txm.begin()
+        self._current_txid = txn.txid
+        return txn.txid
+
+    def commit(self) -> None:
+        if not self._current_txid:
+            return
+        self._txm.commit(self._current_txid)
+        self._current_txid = None
+
+    def rollback(self) -> None:
+        if not self._current_txid:
+            return
+        self._txm.rollback(self._current_txid)
+        self._current_txid = None
+
+    # --- 刷盘 ---
+    def flush_all_dirty_pages(self) -> None:
+        try:
+            if hasattr(self.storage, "flush_all_dirty_pages"):
+                self.storage.flush_all_dirty_pages()
+            elif hasattr(self.storage, "flush_all"):
+                self.storage.flush_all()
+        except Exception:
+            pass
 
     def _execute_join(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行JOIN操作"""
@@ -315,6 +459,7 @@ class HybridExecutionEngine:
         joins = plan.get("joins", [])
         target_columns = plan.get("columns", ["*"])
         where_clause = plan.get("where")
+        join_algo = (plan.get("join_algo") or "").lower()  # "merge" | "hash" | ""
         
         print(f"[EXEC] JOIN tables={tables} joins={joins} cols={target_columns}")
         
@@ -327,11 +472,17 @@ class HybridExecutionEngine:
             right_table = tables[1]
             join_info = joins[0]
             
-            # 调用C++ JOIN算子
-            joined_rows = self.executor.inner_join(
-                left_table, right_table,
-                join_info["left_column"], join_info["right_column"]
-            )
+            # 选择JOIN算法
+            if join_algo == "merge":
+                joined_rows = self.executor.merge_join(
+                    left_table, right_table,
+                    join_info["left_column"], join_info["right_column"]
+                )
+            else:
+                joined_rows = self.executor.inner_join(
+                    left_table, right_table,
+                    join_info["left_column"], join_info["right_column"]
+                )
             
             # 应用WHERE条件（如果有）
             if where_clause:
@@ -355,7 +506,7 @@ class HybridExecutionEngine:
             return {
                 "affected_rows": len(joined_rows),
                 "data": joined_rows,
-                "metadata": {"message": f"JOIN返回 {len(joined_rows)} 行"}
+                "metadata": {"message": f"JOIN返回 {len(joined_rows)} 行", "join_algo": (join_algo or "hash")}
             }
         else:
             raise ExecutionError("暂不支持复杂的多表JOIN")

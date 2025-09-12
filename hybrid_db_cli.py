@@ -28,9 +28,11 @@ class HybridDatabaseCLI:
             print("正在初始化混合架构数据库系统...")
             self.adapter = SQLCompilerAdapter()
             print("=== 混合架构数据库系统 (SQL编译器 + C++执行引擎) ===")
-            print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE")
+            print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE, DROP TABLE")
             print("输入 'exit' 退出, 'help' 查看帮助, 'tables' 显示所有表")
             print("输入 'cache' 查看缓存统计, 'flushcache' 刷新缓存到磁盘")
+            print("输入 'BEGIN' 开启事务, 'COMMIT' 提交, 'ROLLBACK' 回滚")
+            print("输入 'SHOW TRANSACTION' 查看事务状态, 'SET AUTOCOMMIT = ON|OFF' 设置自动提交")
             print("注意: 适配 modules/sql_compiler 的语法限制\n")
         except Exception as e:
             print(f"数据库初始化失败: {str(e)}")
@@ -81,7 +83,18 @@ class HybridDatabaseCLI:
                     if line.lower() == "flushcache":
                         self._flush_cache()
                         break
+
+                    # 事务控制命令（大小写不敏感，直接交给适配器处理）
+                    if line.upper() in ("BEGIN", "COMMIT", "ROLLBACK", "SHOW TRANSACTION") or line.upper().startswith("SET AUTOCOMMIT"):
+                        self._execute_sql(line.upper() + ";")
+                        break
                     
+                    # EXPLAIN 支持：前缀匹配直接执行
+                    if line.lower().startswith("explain "):
+                        sql_lines = [line[len("explain "):]]
+                        self._execute_sql("EXPLAIN " + ' '.join(sql_lines))
+                        break
+
                     # 收集SQL行
                     sql_lines.append(line)
                     
@@ -202,6 +215,14 @@ class HybridDatabaseCLI:
   flush      - 刷盘数据到磁盘
   cache      - 显示缓存统计
   flushcache - 刷新缓存并刷盘
+  SHOW TRANSACTION         - 查看事务状态与缓冲
+  SET AUTOCOMMIT = ON|OFF  - 开关自动提交
+  BEGIN      - 开启事务
+  COMMIT     - 提交事务
+  ROLLBACK   - 回滚事务
+  CREATE INDEX idx ON table(col) PK pkcol;  - 创建二级索引
+  DROP INDEX table(col);                     - 删除索引
+  SHOW INDEXES                               - 查看所有索引
   exit       - 退出程序
 
 📝 SQL语句支持:
@@ -214,6 +235,15 @@ class HybridDatabaseCLI:
   SELECT ... FROM table1 JOIN table2 ON col1=col2        - 表连接
   SELECT ... FROM table ORDER BY col [ASC/DESC]          - 排序查询
   SELECT ... FROM table GROUP BY col                     - 分组查询
+  
+🔎 索引命令:
+  CREATE INDEX idx ON table(col) PK pkcol;               - 创建单列二级索引
+  CREATE COMPOSITE INDEX idx ON table(col1,col2);        - 创建复合索引（内存雏形）
+  DROP INDEX table(col);                                 - 删除索引
+  DROP COMPOSITE INDEX ON table;                         - 删除复合索引
+  SHOW INDEXES;                                          - 查看所有索引
+  SHOW COMPOSITE INDEXES;                                - 查看复合索引
+  EXPLAIN <SQL>;                                         - 显示执行路径与估计
 
 📊 支持的数据类型:
   INT     - 整数
