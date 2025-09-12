@@ -101,6 +101,17 @@ class Catalog:
 
     def has_primary_key(self, table_name, column_name):
         return column_name in self.primary_keys.get(table_name, [])
+    
+    # 索引管理方法（未来扩展）
+    def create_index(self, index_name, table_name, columns, index_type="BTREE", is_unique=False):
+        """创建索引（占位方法）"""
+        # 未来可以在这里存储索引元数据
+        pass
+    
+    def drop_index(self, index_name):
+        """删除索引（占位方法）"""
+        # 未来可以在这里删除索引元数据
+        pass
 
     def add_foreign_key(self, table_name, column_name, ref_table, ref_column):
         """添加外键约束"""
@@ -174,6 +185,8 @@ class SemanticAnalyzer:
             self._check_drop(ast)
         elif node_type in ["BEGIN_TRANSACTION", "COMMIT", "ROLLBACK"]:
             self._check_transaction_statement(ast)
+        elif node_type in ["CREATE_INDEX", "DROP_INDEX"]:
+            self._check_index_statement(ast)
 
     def _check_create(self, ast):
         table_name = ast.value
@@ -751,3 +764,74 @@ class SemanticAnalyzer:
     def _check_transaction_statement(self, ast):
         """检查事务控制语句（目前仅通过）"""
         print(f"[OK] {ast.node_type} 语义检查通过")
+    
+    def _check_index_statement(self, ast):
+        """检查索引语句的语义正确性"""
+        if ast.node_type == "CREATE_INDEX":
+            self._check_create_index(ast)
+        elif ast.node_type == "DROP_INDEX":
+            self._check_drop_index(ast)
+    
+    def _check_create_index(self, ast):
+        """检查 CREATE INDEX 语句"""
+        index_name = ast.value
+        
+        # 获取表名和列名
+        table_node = next((c for c in ast.children if c.node_type == "TABLE"), None)
+        columns_node = next((c for c in ast.children if c.node_type == "COLUMNS"), None)
+        
+        if not table_node:
+            raise SemanticError("IndexError", index_name, "CREATE INDEX 语句缺少表名")
+        
+        if not columns_node:
+            raise SemanticError("IndexError", index_name, "CREATE INDEX 语句缺少列名")
+        
+        table_name = table_node.value
+        column_names = columns_node.value.split(",")
+        
+        # 检查表是否存在
+        if not self.catalog.has_table(table_name):
+            raise SemanticError(
+                "TableError", table_name, f"索引 '{index_name}' 引用的表 '{table_name}' 不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
+        
+        # 检查所有列是否存在
+        for col_name in column_names:
+            col_name = col_name.strip()
+            if not self.catalog.has_column(table_name, col_name):
+                raise SemanticError(
+                    "ColumnError", col_name, 
+                    f"索引 '{index_name}' 引用的列 '{col_name}' 在表 '{table_name}' 中不存在",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+        
+        # 检查索引类型
+        type_node = next((c for c in ast.children if c.node_type == "TYPE"), None)
+        if type_node and type_node.value not in ["BTREE", "HASH"]:
+            raise SemanticError(
+                "IndexError", index_name, f"不支持的索引类型: {type_node.value}"
+            )
+        
+        # 检查唱一性约束
+        unique_node = next((c for c in ast.children if c.node_type == "UNIQUE"), None)
+        is_unique = unique_node is not None
+        
+        print(f"[OK] CREATE INDEX {index_name} 语义检查通过")
+        if is_unique:
+            print(f"    索引类型: 唯一索引")
+        print(f"    表: {table_name}")
+        print(f"    列: {', '.join(column_names)}")
+        if type_node:
+            print(f"    索引类型: {type_node.value}")
+    
+    def _check_drop_index(self, ast):
+        """检查 DROP INDEX 语句"""
+        index_name = ast.value
+        
+        # 目前暂时不检查索引是否存在（需要索引元数据管理）
+        # 未来可以扩展 catalog 来管理索引信息
+        
+        print(f"[OK] DROP INDEX {index_name} 语义检查通过")

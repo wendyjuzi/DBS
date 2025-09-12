@@ -216,8 +216,43 @@ class SmartErrorDiagnostic:
         """诊断语法错误"""
         suggestions = []
         
+        # 处理索引类型错误的特殊情况
+        if "不支持的索引类型" in error_msg:
+            # 从错误消息中提取索引类型
+            import re
+            match = re.search(r"不支持的索引类型 '(\w+)'", error_msg)
+            if match:
+                index_type = match.groups()[0]
+                suggestions.append(ErrorSuggestion(
+                    suggestion=f"'{index_type}' 不是支持的索引类型",
+                    confidence=0.95,
+                    fix_type="unsupported_index_type",
+                    example="支持的索引类型: BTREE, HASH"
+                ))
+                
+                # 尝试模糊匹配
+                index_types = ['BTREE', 'HASH']
+                close_matches = difflib.get_close_matches(
+                    index_type.upper(), index_types, n=2, cutoff=0.5
+                )
+                if close_matches:
+                    for match_type in close_matches:
+                        suggestions.append(ErrorSuggestion(
+                            suggestion=f"您是否想使用索引类型 '{match_type}'?",
+                            confidence=0.8,
+                            fix_type="index_type_suggestion",
+                            example=f"使用: USING {match_type}"
+                        ))
+                
+                suggestions.append(ErrorSuggestion(
+                    suggestion="B+树索引适合范围查询，哈希索引适合等值查询",
+                    confidence=0.8,
+                    fix_type="index_type_guidance",
+                    example="范围查询选择BTREE，精确匹配选择HASH"
+                ))
+        
         # 分析未知语句（可能是拼写错误）
-        if "Unknown statement" in error_msg and context.startswith("statement_start:"):
+        elif "Unknown statement" in error_msg and context.startswith("statement_start:"):
             statement_word = context.split(":")[1]
             if statement_word.upper() in self.common_misspellings:
                 correct_word = self.common_misspellings[statement_word.upper()]
@@ -303,6 +338,42 @@ class SmartErrorDiagnostic:
                     fix_type="begin_statement_syntax",
                     example="正确格式: BEGIN; 或 BEGIN TRANSACTION; 或 BEGIN WORK;"
                 ))
+            elif "USING" in context.upper() or "index" in context.lower() or "create_index_using_type" in context:
+                # 索引类型错误
+                if got.upper() in ['UNKNOWN', 'INVALID', 'UNSUPPORTED']:
+                    suggestions.append(ErrorSuggestion(
+                        suggestion=f"'{got}' 不是支持的索引类型",
+                        confidence=0.95,
+                        fix_type="unsupported_index_type",
+                        example="支持的索引类型: BTREE, HASH"
+                    ))
+                    suggestions.append(ErrorSuggestion(
+                        suggestion="B+树索引适合范围查询，哈希索引适合等值查询",
+                        confidence=0.8,
+                        fix_type="index_type_guidance",
+                        example="使用: USING BTREE 或 USING HASH"
+                    ))
+                else:
+                    # 其他可能的索引类型拼写错误
+                    index_types = ['BTREE', 'HASH']
+                    close_matches = difflib.get_close_matches(
+                        got.upper(), index_types, n=2, cutoff=0.5
+                    )
+                    if close_matches:
+                        for match in close_matches:
+                            suggestions.append(ErrorSuggestion(
+                                suggestion=f"您是否想使用索引类型 '{match}'?",
+                                confidence=0.8,
+                                fix_type="index_type_suggestion",
+                                example=f"使用: USING {match}"
+                            ))
+                    else:
+                        suggestions.append(ErrorSuggestion(
+                            suggestion="只支持 BTREE 和 HASH 索引类型",
+                            confidence=0.9,
+                            fix_type="supported_index_types_info",
+                            example="使用: USING BTREE 或 USING HASH"
+                        ))
         
         # 分析标识符问题
         if "identifier" in expected.lower() or "IDENTIFIER" in expected:
@@ -408,6 +479,55 @@ class SmartErrorDiagnostic:
                     fix_type="wildcard_semantic_error",
                     example="'*' 表示选择所有列"
                 ))
+            elif "索引" in message and "引用的列" in message:
+                # 索引相关的列错误
+                if available_columns:
+                    # 从错误消息中提取表名
+                    import re
+                    match = re.search(r"在表 '(\w+)' 中不存在", message)
+                    if match:
+                        table_name = match.groups()[0]
+                        if table_name in available_columns:
+                            table_columns = available_columns[table_name]
+                            close_matches = difflib.get_close_matches(
+                                position, table_columns, n=3, cutoff=0.6
+                            )
+                            for match_col in close_matches:
+                                suggestions.append(ErrorSuggestion(
+                                    suggestion=f"您是否想引用列 '{match_col}'?",
+                                    confidence=0.8,
+                                    fix_type="index_column_suggestion",
+                                    example=f"CREATE INDEX idx_name ON {table_name} ({match_col})"
+                                ))
+                
+                suggestions.append(ErrorSuggestion(
+                    suggestion="检查索引列名是否正确拼写和存在",
+                    confidence=0.9,
+                    fix_type="index_column_check",
+                    example="确保CREATE INDEX中的列名在表中已定义"
+                ))
+                
+                # 提供查看表结构的建议
+                suggestions.append(ErrorSuggestion(
+                    suggestion="可以先查看表结构确认列名",
+                    confidence=0.7,
+                    fix_type="table_structure_check",
+                    example="使用 DESCRIBE table_name 查看表结构"
+                ))
+                
+                # 提供表的实际列信息
+                if available_columns:
+                    match = re.search(r"在表 '(\w+)' 中不存在", message)
+                    if match:
+                        table_name = match.groups()[0]
+                        if table_name in available_columns:
+                            actual_columns = available_columns[table_name]
+                            suggestions.append(ErrorSuggestion(
+                                suggestion=f"表 '{table_name}' 的可用列: {', '.join(actual_columns)}",
+                                confidence=0.9,
+                                fix_type="available_columns_info",
+                                example=f"选择其中一个列: {actual_columns[0] if actual_columns else 'N/A'}"
+                            ))
             elif available_columns:
                 all_columns = []
                 for table, cols in available_columns.items():
@@ -508,6 +628,102 @@ class SmartErrorDiagnostic:
                     confidence=0.95,
                     fix_type="foreign_key_dependency",
                     example="先删除引用此表的外键约束，再删除表"
+                ))
+
+        elif error_type == "IndexError":
+            # 索引错误
+            if "引用的列" in message and "不存在" in message:
+                # 分析列名，提供相似列名建议
+                if available_columns:
+                    # 从错误消息中提取表名和列名
+                    # 格式: "索引 'idx_name' 引用的列 'col_name' 在表 'table_name' 中不存在"
+                    import re
+                    match = re.search(r"引用的列 '(\w+)' 在表 '(\w+)' 中不存在", message)
+                    if match:
+                        col_name, table_name = match.groups()
+                        if table_name in available_columns:
+                            table_columns = available_columns[table_name]
+                            close_matches = difflib.get_close_matches(
+                                col_name, table_columns, n=3, cutoff=0.6
+                            )
+                            for match_col in close_matches:
+                                suggestions.append(ErrorSuggestion(
+                                    suggestion=f"您是否想引用列 '{match_col}'?",
+                                    confidence=0.8,
+                                    fix_type="index_column_suggestion",
+                                    example=f"CREATE INDEX idx_name ON {table_name} ({match_col})"
+                                ))
+                
+                suggestions.append(ErrorSuggestion(
+                    suggestion="检查索引列名是否正确拼写和存在",
+                    confidence=0.9,
+                    fix_type="index_column_check",
+                    example="确保CREATE INDEX中的列名在表中已定义"
+                ))
+                
+                # 提供查看表结构的建议
+                suggestions.append(ErrorSuggestion(
+                    suggestion="可以先查看表结构确认列名",
+                    confidence=0.7,
+                    fix_type="table_structure_check",
+                    example="使用 DESCRIBE table_name 查看表结构"
+                ))
+            
+            elif "表" in message and "不存在" in message:
+                # 索引引用的表不存在
+                if available_tables:
+                    # 从错误消息中提取表名
+                    import re
+                    match = re.search(r"引用的表 '(\w+)' 不存在", message)
+                    if match:
+                        table_name = match.groups()[0]
+                        close_matches = difflib.get_close_matches(
+                            table_name, available_tables, n=3, cutoff=0.6
+                        )
+                        for match_table in close_matches:
+                            suggestions.append(ErrorSuggestion(
+                                suggestion=f"您是否想引用表 '{match_table}'?",
+                                confidence=0.8,
+                                fix_type="index_table_suggestion",
+                                example=f"CREATE INDEX idx_name ON {match_table} (column_name)"
+                            ))
+                
+                suggestions.append(ErrorSuggestion(
+                    suggestion="请确保表已创建，或检查表名拼写",
+                    confidence=0.9,
+                    fix_type="index_table_check",
+                    example="先使用 CREATE TABLE 创建表，再创建索引"
+                ))
+            
+            elif "不支持的索引类型" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="只支持 BTREE 和 HASH 索引类型",
+                    confidence=0.95,
+                    fix_type="supported_index_types",
+                    example="使用: USING BTREE 或 USING HASH"
+                ))
+                
+                suggestions.append(ErrorSuggestion(
+                    suggestion="B+树索引适合范围查询，哈希索引适合等值查询",
+                    confidence=0.8,
+                    fix_type="index_type_guidance",
+                    example="范围查询选择BTREE，精确匹配选择HASH"
+                ))
+            
+            else:
+                # 通用索引错误建议
+                suggestions.append(ErrorSuggestion(
+                    suggestion="检查索引语法是否正确",
+                    confidence=0.7,
+                    fix_type="index_syntax_check",
+                    example="CREATE INDEX index_name ON table_name (column1, column2)"
+                ))
+                
+                suggestions.append(ErrorSuggestion(
+                    suggestion="索引名在数据库中应该是唯一的",
+                    confidence=0.6,
+                    fix_type="index_name_uniqueness",
+                    example="使用描述性的索引名，如 idx_table_column"
                 ))
 
         return DiagnosticResult(

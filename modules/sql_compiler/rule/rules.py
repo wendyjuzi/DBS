@@ -6,6 +6,8 @@ KEYWORDS = {
     "REFERENCES", "CONSTRAINT", "NOT", "NULL", "UNIQUE", "DROP",
     # 事务控制
     "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "WORK",
+    # 索引相关
+    "INDEX", "UNIQUE", "BTREE", "HASH", "USING",
     # 逻辑操作符
     "AND", "OR", "NOT",
     # 范围查询
