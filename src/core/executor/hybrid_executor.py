@@ -22,6 +22,10 @@ class HybridExecutionEngine:
         self._wal = WALManager()
         self._txm = TransactionManager(self._wal)
         self._current_txid: Optional[str] = None
+        # 事务覆盖层：table -> { 'insert': List[List[str]], 'delete': Set[str], 'mvcc_inserts': Set[str], 'mvcc_deletes': Set[str] }
+        self._tx_overlay: Dict[str, Dict[str, Any]] = {}
+        # 行版本链：key=(table, pk) -> {'head': Version}
+        self._versions: Dict[tuple, Dict[str, Any]] = {}
         # 多列二级索引管理（内存）
         self.index_manager = IndexManager()
         self._logger = get_logger("executor")
@@ -145,6 +149,29 @@ class HybridExecutionEngine:
         txid = self._current_txid or self._txm.begin().txid
         is_implicit_tx = self._current_txid is None
         self._wal.append(LogRecord(txid=txid, op="INSERT", table=table_name, payload={"values": values}))
+        # 若在显式事务中，写入版本链（下沉到C++），不落到底层
+        if not is_implicit_tx:
+            pk_col = self._get_pk_column(table_name)
+            if pk_col is None:
+                ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set(), "mvcc_inserts": set()})
+                ov["insert"].append(list(values))
+            else:
+                pk_idx = self.table_columns[table_name].index(pk_col)
+                pk_value = str(values[pk_idx])
+                try:
+                    # 调用C++ MVCC插入未提交版本
+                    self.storage.mvcc_insert_uncommitted(table_name, list(values), txid, pk_idx)
+                except Exception:
+                    pass
+                ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set(), "mvcc_inserts": set()})
+                ov["mvcc_inserts"].add(pk_value)
+            # 覆盖层下立即维护二级索引（仅查询加速）
+            try:
+                self.index_manager.on_insert(table_name, values, self.table_columns[table_name])
+            except Exception:
+                pass
+            return {"affected_rows": 1}
+
         success = self.executor.insert(table_name, values)
         print(f"[EXEC] INSERT 调用C++返回: {success}")
         if success:
@@ -260,6 +287,8 @@ class HybridExecutionEngine:
                 print("[EXEC] 索引未命中或过滤后为空，回退顺扫+过滤")
                 scanned_rows = self.executor.seq_scan(table_name)
                 filtered_rows = self._python_filter(scanned_rows, pushdown) if pushdown else scanned_rows
+            # 应用 MVCC 可见性替换
+            filtered_rows = self._apply_mvcc_to_rows(table_name, filtered_rows)
         else:
             scanned_rows = self.executor.seq_scan(table_name)
             print(f"[EXEC] SEQ 扫描返回 {len(scanned_rows)} 行")
@@ -273,11 +302,19 @@ class HybridExecutionEngine:
                 # 无条件
                 filtered_rows = scanned_rows
             print(f"[EXEC] 过滤后 {len(filtered_rows)} 行")
+        # MVCC：在投影前应用版本链可见性替换（调用C++可见性查询）
+        filtered_rows = self._apply_mvcc_to_rows(table_name, filtered_rows)
         # 投影
         try:
             projected_data = self.executor.project(table_name, filtered_rows, target_columns)
         except Exception:
             projected_data = [r.get_values() for r in filtered_rows]
+        # 事务覆盖层合并（仅当前表，无JOIN时）：
+        if self._current_txid and table_name in self._tx_overlay:
+            try:
+                projected_data = self._merge_txn_overlay_select(table_name, target_columns, projected_data, pushdown)
+            except Exception:
+                pass
         print(f"[EXEC] 投影列 {target_columns} -> 返回 {len(projected_data)} 行")
         return {"data": projected_data, "affected_rows": len(projected_data), "metadata": {"columns": target_columns}}
 
@@ -347,16 +384,24 @@ class HybridExecutionEngine:
         deleted_count = 0
         # 需要列名与主键列
         col_names = self.table_columns.get(table_name, [])
-        pk_col = None
-        for name in col_names:
-            # 简化：约定第一个名为 id 的为主键，或优化器/存储可提供主键信息
-            if name.lower() in ("id", "pk", "primary", "primary_key"):
-                pk_col = name
-                break
+        pk_col = self._get_pk_column(table_name)
         # 无法确认主键时直接调用 C++ 删除
         if pk_col is None:
             self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"where": where_clause}))
-            deleted_count = self.executor.delete_rows(table_name, predicate)
+            # 覆盖层场景：若在事务中，退回到底层删除将破坏隔离，这里在显式事务内改为不物化
+            if is_implicit_tx:
+                deleted_count = self.executor.delete_rows(table_name, predicate)
+            else:
+                # 事务中：扫描PK并标记删除
+                ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set()})
+                for r in self.executor.seq_scan(table_name):
+                    vals = r.get_values()
+                    try:
+                        if predicate(vals):
+                            # 无法获知PK，跳过
+                            pass
+                    except Exception:
+                        continue
         else:
             # 扫描并按谓词删除，维护索引
             for r in self.executor.seq_scan(table_name):
@@ -365,13 +410,20 @@ class HybridExecutionEngine:
                     if predicate(vals):
                         pk_value = vals[col_names.index(pk_col)]
                         self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"pk": pk_value}))
-                        if self.executor.delete_row_by_pk:
-                            self.executor.delete_row_by_pk(table_name, str(pk_value))
+                        if is_implicit_tx:
+                            # 直接物化删除
+                            try:
+                                # 优先用谓词删除
+                                deleted_count += int(self.executor.delete_rows(table_name, lambda x, pv=str(pk_value), idx=col_names.index(pk_col): x[idx] == pv))
+                            except Exception:
+                                pass
+                            self.index_manager.on_delete(table_name, str(pk_value))
                         else:
-                            # 回退到批量删除
-                            pass
-                        self.index_manager.on_delete(table_name, str(pk_value))
-                        deleted_count += 1
+                            # 事务中：标记删除（MVCC：提交时设置 xmax）
+                            ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set(), "mvcc_inserts": set(), "mvcc_deletes": set()})
+                            ov["delete"].add(str(pk_value))
+                            ov["mvcc_deletes"].add(str(pk_value))
+                            deleted_count += 1
                 except Exception:
                     continue
         if is_implicit_tx:
@@ -388,6 +440,13 @@ class HybridExecutionEngine:
                 processed_clause = processed_clause.replace(f"{col_name} ", f"x[{col_idx}] ")
                 processed_clause = processed_clause.replace(f" {col_name}", f" x[{col_idx}]")
                 processed_clause = processed_clause.replace(f"'{col_name}'", f"x[{col_idx}]")
+        # 归一化逻辑与比较运算符
+        import re as _re
+        processed_clause = _re.sub(r"\\bAND\\b", "and", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\\bOR\\b", "or", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\\bNOT\\b", "not", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"<>", "!=", processed_clause)
+        processed_clause = _re.sub(r"(?<![<>!=])=(?![=])", "==", processed_clause)
         try:
             return eval(f"lambda x: {processed_clause}")
         except Exception as e:
@@ -429,19 +488,83 @@ class HybridExecutionEngine:
             return self._current_txid
         txn = self._txm.begin()
         self._current_txid = txn.txid
+        self._tx_overlay.clear()
+        # 快照 = 当前 txid 与活跃 tx 集
+        self._current_snapshot = {
+            "txid": txn.txid,
+            "active": self._txm.get_active_txids()
+        }
         return txn.txid
 
     def commit(self) -> None:
         if not self._current_txid:
             return
+        # 物化覆盖层 + 提交版本链
+        for table_name, ov in list(self._tx_overlay.items()):
+            inserts: List[List[str]] = ov.get("insert", []) or []
+            deletes: set = ov.get("delete", set()) or set()
+            mvcc_inserts: set = ov.get("mvcc_inserts", set()) or set()
+            mvcc_deletes: set = ov.get("mvcc_deletes", set()) or set()
+            # 应用删除
+            if deletes:
+                pk_col = self._get_pk_column(table_name)
+                if pk_col is not None and table_name in self.table_columns:
+                    idx = self.table_columns[table_name].index(pk_col)
+                    for pk in list(deletes):
+                        try:
+                            self.executor.delete_rows(table_name, lambda x, pv=str(pk), i=idx: x[i] == pv)
+                        except Exception:
+                            pass
+                        self.index_manager.on_delete(table_name, str(pk))
+            # 应用插入
+            for row in inserts:
+                try:
+                    if self.executor.insert(table_name, row):
+                        self.index_manager.on_insert(table_name, row, self.table_columns.get(table_name, []))
+                except Exception:
+                    pass
+            # 提交版本链插入（将本事务创建的 head 置为已提交）
+            for pk in list(mvcc_inserts):
+                try:
+                    self.storage.mvcc_commit_insert(table_name, pk, self._current_txid)
+                except Exception:
+                    pass
+            # 提交版本链删除（设置可见版本的 xmax）
+            if mvcc_deletes:
+                for pk in list(mvcc_deletes):
+                    try:
+                        self.storage.mvcc_mark_delete_commit(table_name, pk, self._current_txid)
+                    except Exception:
+                        pass
+        self._tx_overlay.clear()
         self._txm.commit(self._current_txid)
         self._current_txid = None
+        self._current_snapshot = None
 
     def rollback(self) -> None:
         if not self._current_txid:
             return
+        # 丢弃覆盖层 + 弹出未提交版本 + 撤销本事务设置的 xmax
+        for table_name, ov in list(self._tx_overlay.items()):
+            mvcc_inserts: set = ov.get("mvcc_inserts", set()) or set()
+            mvcc_deletes: set = ov.get("mvcc_deletes", set()) or set()
+            for pk in list(mvcc_inserts):
+                try:
+                    self.storage.mvcc_rollback_insert(table_name, pk, self._current_txid)
+                except Exception:
+                    pass
+            for pk in list(mvcc_deletes):
+                head = self._get_version_head(table_name, pk)
+                cur = head
+                while cur:
+                    if cur.xmax == self._current_txid:
+                        cur.xmax = None
+                        break
+                    cur = cur.next
+        self._tx_overlay.clear()
         self._txm.rollback(self._current_txid)
         self._current_txid = None
+        self._current_snapshot = None
 
     # --- 刷盘 ---
     def flush_all_dirty_pages(self) -> None:
@@ -452,6 +575,180 @@ class HybridExecutionEngine:
                 self.storage.flush_all()
         except Exception:
             pass
+    
+    def get_tx_overlay_snapshot(self) -> Dict[str, Any]:
+        """返回事务覆盖层的快照信息，供 CLI/Adapter 观测。
+        格式: { in_tx: bool, tables: { table: { inserts: int, deletes: int } } }
+        """
+        info: Dict[str, Any] = {"in_tx": bool(self._current_txid), "tables": {}}
+        if not self._current_txid:
+            return info
+        for table_name, ov in self._tx_overlay.items():
+            inserts = len(ov.get("insert", []) or [])
+            deletes = len(ov.get("delete", set()) or set())
+            info["tables"][table_name] = {"inserts": inserts, "deletes": deletes}
+        return info
+
+    # --- MVCC version chain (skeleton) ---
+    class _Version:
+        def __init__(self, values: List[str], xmin: str, committed: bool):
+            self.values = list(values)
+            self.xmin = xmin
+            self.xmax: Optional[str] = None
+            self.committed = committed
+            self.next: Optional['HybridExecutionEngine._Version'] = None
+
+    def _get_version_head(self, table: str, pk: str) -> Optional['HybridExecutionEngine._Version']:
+        node = self._versions.get((table, pk))
+        return node.get('head') if node else None
+
+    def _set_version_head(self, table: str, pk: str, head: 'HybridExecutionEngine._Version') -> None:
+        self._versions[(table, pk)] = {'head': head}
+
+    def _is_visible(self, ver: 'HybridExecutionEngine._Version', snapshot: Dict[str, Any]) -> bool:
+        if not ver.committed:
+            # 仅对本事务可见
+            return self._current_txid is not None and ver.xmin == self._current_txid
+        txid = snapshot.get('txid') if snapshot else None
+        active = snapshot.get('active') if snapshot else set()
+        if txid is None:
+            return ver.committed and ver.xmax is None
+        # 可见性规则：xmin 提交且不在活跃集中，xmin <= txid 且 (xmax is None or xmax > txid)
+        if ver.xmax is not None and ver.xmax <= txid:
+            return False
+        if ver.xmin in active:
+            return False
+        return True
+
+    def _lookup_visible_version(self, table: str, pk: str) -> Optional[List[str]]:
+        head = self._get_version_head(table, pk)
+        cur = head
+        snap = getattr(self, '_current_snapshot', None)
+        while cur:
+            if self._is_visible(cur, snap):
+                return list(cur.values)
+            cur = cur.next
+        return None
+
+    # --- helpers ---
+    def _get_pk_column(self, table_name: str) -> Optional[str]:
+        try:
+            cols = list(self.storage.get_table_columns(table_name))
+            # 简化：推断常见主键列名
+            for name in cols:
+                if str(name).lower() in ("id", "pk", "primary", "primary_key"):
+                    return name
+        except Exception:
+            pass
+        # 回退：若列缓存可用，尝试同样规则
+        for name in self.table_columns.get(table_name, []):
+            if str(name).lower() in ("id", "pk", "primary", "primary_key"):
+                return name
+        return None
+
+    def _merge_txn_overlay_select(self, table_name: str, target_columns: List[str], projected_rows: List[List[str]], pushdown: List[Tuple[int, str, str]]):
+        """在结果集层面合并事务覆盖层：追加新增、剔除删除（当 PK 列被投影时）。"""
+        ov = self._tx_overlay.get(table_name) or {}
+        inserts: List[List[str]] = ov.get("insert", []) or []
+        deletes: set = ov.get("delete", set()) or set()
+        base = list(projected_rows)
+        # 删除：仅当 PK 出现在投影列中
+        pk_col = self._get_pk_column(table_name)
+        if pk_col and pk_col in target_columns and deletes:
+            pk_idx_in_proj = target_columns.index(pk_col)
+            base = [r for r in base if str(r[pk_idx_in_proj]) not in deletes]
+
+        # 追加插入：按投影列构造并应用过滤（基于 pushdown 条件）
+        if inserts:
+            # 建立列名->下标
+            table_cols = self.table_columns.get(table_name, [])
+            col_to_idx = {c: i for i, c in enumerate(table_cols)}
+            # 评估函数（与 _python_filter 一致，但基于值序列）
+            def eval_cond(lhs: str, op: str, rhs: str) -> bool:
+                try:
+                    ln = float(lhs); rn = float(rhs)
+                    if op == "=": return ln == rn
+                    if op == ">": return ln > rn
+                    if op == "<": return ln < rn
+                    if op == ">=": return ln >= rn
+                    if op == "<=": return ln <= rn
+                    if op == "!=": return ln != rn
+                    return False
+                except:
+                    if op == "=": return lhs == rhs
+                    if op == ">": return lhs > rhs
+                    if op == "<": return lhs < rhs
+                    if op == ">=": return lhs >= rhs
+                    if op == "<=": return lhs <= rhs
+                    if op == "!=": return lhs != rhs
+                    return False
+            for row in inserts:
+                # 过滤（如果有）
+                ok = True
+                for idx, op, val in pushdown:
+                    if idx < 0 or idx >= len(table_cols):
+                        continue
+                    src_idx = idx
+                    if src_idx >= len(row) or not eval_cond(str(row[src_idx]), op, val):
+                        ok = False; break
+                if not ok:
+                    continue
+                # 投影
+                proj = []
+                for c in target_columns:
+                    if c in col_to_idx and col_to_idx[c] < len(row):
+                        proj.append(row[col_to_idx[c]])
+                if proj:
+                    base.append(proj)
+        return base
+
+    def _apply_mvcc_to_rows(self, table_name: str, rows):
+        """使用 C++ 版本链按当前快照替换可见行；对未命中版本链的行原样返回。"""
+        if not self._current_txid:
+            return rows
+        table_cols = self.table_columns.get(table_name, [])
+        pk_col = self._get_pk_column(table_name)
+        if not pk_col or pk_col not in table_cols:
+            return rows
+        pk_idx = table_cols.index(pk_col)
+        try:
+            from db_core import Row as CppRow
+        except Exception:
+            CppRow = None
+        snap = getattr(self, '_current_snapshot', None) or {}
+        reader = str(snap.get('txid', ''))
+        active = list(snap.get('active', []))
+        out = []
+        for r in rows:
+            vals = r.get_values()
+            if pk_idx >= len(vals):
+                continue
+            pk = str(vals[pk_idx])
+            visible = None
+            try:
+                vis = self.storage.mvcc_lookup_visible(table_name, pk, reader, active)
+                if vis:
+                    visible = list(vis)
+            except Exception:
+                pass
+            if visible is None:
+                # 可能版本链无记录，保留底层
+                out.append(r)
+            else:
+                if CppRow:
+                    out.append(CppRow(visible))
+                else:
+                    out.append(r)
+        # 事务内新插入但底层无记录的 PK，追加为可见
+        ov = self._tx_overlay.get(table_name) or {}
+        for pk in list(ov.get("mvcc_inserts", set()) or set()):
+            try:
+                vis = self.storage.mvcc_lookup_visible(table_name, pk, reader, active)
+                if vis and CppRow:
+                    out.append(CppRow(list(vis)))
+            except Exception:
+                continue
+        return out
 
     def _execute_join(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行JOIN操作"""

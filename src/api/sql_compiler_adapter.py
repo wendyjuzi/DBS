@@ -16,6 +16,7 @@ from modules.sql_compiler.lexical.lexer import Lexer
 from modules.sql_compiler.syntax.parser import Parser, ParseError
 from modules.sql_compiler.semantic.semantic import SemanticAnalyzer, Catalog
 from modules.sql_compiler.planner.planner import Planner
+from modules.sql_compiler.optimizer.query_optimizer import QueryOptimizer as CompilerQueryOptimizer
 from src.core.executor.hybrid_executor import HybridExecutionEngine
 from src.utils.exceptions import ExecutionError, SQLSyntaxError
 from src.index.index_manager import IndexManager
@@ -34,6 +35,7 @@ class SQLCompilerAdapter:
         # 初始化SQL编译器组件
         self.catalog = Catalog()
         self.semantic_analyzer = SemanticAnalyzer(self.catalog)
+        self.compiler_optimizer = CompilerQueryOptimizer()
         # 事务状态与缓冲（仅对 INSERT 做批量缓冲以优化性能）
         self.in_transaction: bool = False
         self.autocommit: bool = True
@@ -84,6 +86,8 @@ class SQLCompilerAdapter:
                 raise ExecutionError("C++执行引擎不可用")
         # 索引管理器
         self.index_manager = IndexManager()
+        # 轻量统计缓存：table -> { 'rows': int, 'cols': {col: {'ndv': int, 'min': val, 'max': val}} }
+        self._stats: Dict[str, Any] = {}
     
     def _convert_plan_to_executor_format(self, compiler_plan) -> Dict[str, Any]:
         """
@@ -323,6 +327,15 @@ class SQLCompilerAdapter:
             ast_list_dict = [ast.to_dict() for ast in ast_list]
             planner = Planner(ast_list_dict, enable_optimization=True)
             compiler_plans = planner.generate_plan()
+            # 4.5 使用编译器侧优化器对 LogicalPlan 优化（谓词/投影下推、Join重排等）
+            try:
+                optimized_plans = []
+                for lp in compiler_plans:
+                    optimized_plans.append(self.compiler_optimizer.optimize(lp))
+                compiler_plans = optimized_plans
+                print(f"[ADAPTER] 编译器优化完成: 计划数={len(compiler_plans)}")
+            except Exception as e:
+                print(f"[ADAPTER] 编译器优化跳过: {e}")
             
             print(f"[ADAPTER] 编译器计划生成成功，生成 {len(compiler_plans)} 个计划")
             
@@ -374,11 +387,110 @@ class SQLCompilerAdapter:
 
     # === 路径选择与 EXPLAIN ===
     def _estimate_table_rows(self, table: str) -> int:
+        # 优先使用已采样统计
+        st = self._stats.get(table)
+        if st and isinstance(st.get('rows', None), int):
+            return int(st['rows'])
+        # 次选：C++ 暴露的索引大小（近似行数）
         try:
-            # 简易估计：用最大页ID近似行数（可替换为统计信息）
-            return int(self.hybrid_executor.storage.get_index_size(table)) if hasattr(self.hybrid_executor.storage, 'get_index_size') else 0
+            if hasattr(self.hybrid_executor.storage, 'get_index_size'):
+                rc = int(self.hybrid_executor.storage.get_index_size(table))
+                if rc > 0:
+                    return rc
         except Exception:
-            return 0
+            pass
+        # 退化：0
+        return 0
+
+    # --- 轻量统计采样与选择性估计 ---
+    def _ensure_table_stats(self, table: str, sample_limit: int = 256) -> None:
+        if table in self._stats:
+            return
+        try:
+            # 确保列名可用
+            if table not in self.hybrid_executor.table_columns:
+                self.hybrid_executor._ensure_table_cached(table)
+            cols = self.hybrid_executor.table_columns.get(table, [])
+            if not cols:
+                self._stats[table] = {'rows': 0, 'cols': {}}
+                return
+            # 采样若干行
+            rows = self.hybrid_executor.executor.seq_scan(table)
+            values = []
+            cnt = 0
+            for r in rows:
+                values.append(r.get_values())
+                cnt += 1
+                if cnt >= sample_limit:
+                    break
+            # 行数估计：样本数量或 C++ 索引规模
+            row_est = cnt
+            try:
+                if hasattr(self.hybrid_executor.storage, 'get_index_size'):
+                    rc = int(self.hybrid_executor.storage.get_index_size(table))
+                    row_est = max(row_est, rc)
+            except Exception:
+                pass
+            # 列统计
+            col_stats: Dict[str, Any] = {}
+            for i, c in enumerate(cols):
+                seen = set()
+                vmin = None; vmax = None
+                for v in values:
+                    if i >= len(v):
+                        continue
+                    s = v[i]
+                    seen.add(s)
+                    # 数值范围
+                    try:
+                        x = float(s)
+                        vmin = x if vmin is None else min(vmin, x)
+                        vmax = x if vmax is None else max(vmax, x)
+                    except Exception:
+                        pass
+                ndv = max(1, len(seen))
+                ent = {'ndv': ndv}
+                if vmin is not None and vmax is not None:
+                    ent['min'] = vmin; ent['max'] = vmax
+                col_stats[c] = ent
+            self._stats[table] = {'rows': row_est, 'cols': col_stats}
+        except Exception:
+            self._stats[table] = {'rows': 0, 'cols': {}}
+
+    def _estimate_selectivity(self, table: str, flt: List[Dict[str, Any]]) -> float:
+        if not flt:
+            return 1.0
+        self._ensure_table_stats(table)
+        st = self._stats.get(table, {})
+        cstats = st.get('cols', {})
+        # 简化：按 AND 连接独立性估计
+        sel = 1.0
+        for cond in flt:
+            col = cond.get('column', '')
+            op  = cond.get('op', '=')
+            val = cond.get('value', '')
+            cs = cstats.get(col, {})
+            ndv = int(cs.get('ndv', 100))
+            # 等值
+            if op == '=':
+                sel *= max(1.0/ndv, 0.001)
+            elif op in ('>', '>=', '<', '<='):
+                try:
+                    v = float(val); vmin = cs.get('min', None); vmax = cs.get('max', None)
+                    if isinstance(vmin, (int,float)) and isinstance(vmax, (int,float)) and vmax > vmin:
+                        if op in ('>', '>='):
+                            frac = max(0.0, min(1.0, (vmax - v) / (vmax - vmin)))
+                        else:
+                            frac = max(0.0, min(1.0, (v - vmin) / (vmax - vmin)))
+                        sel *= max(frac, 0.001)
+                    else:
+                        sel *= 0.1
+                except Exception:
+                    sel *= 0.1
+            else:
+                sel *= 0.3
+        # 限制范围
+        return max(0.0001, min(1.0, sel))
 
     def _choose_path(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         p = dict(plan)
@@ -386,26 +498,76 @@ class SQLCompilerAdapter:
         if p.get("type") == "SELECT":
             table = p.get("table", "")
             flt = p.get("filter") or []
+            # 确保有统计并获取更准的行数估计
+            self._ensure_table_stats(table)
             rows = self._estimate_table_rows(table)
             p_meta["table_rows_estimate"] = rows
-            # 单条件：等值优先点查；范围优先范围/批量回表
-            if len(flt) == 1:
-                op = flt[0].get("op"); col = flt[0].get("column", "")
-                if op == "=":
-                    if self.index_manager.has_index(table, col):
-                        p_meta["path"] = "secondary_index_eq"
-                    else:
-                        p_meta["path"] = "seq_scan"
-                elif op in (">", ">=", "<", "<="):
-                    if self.index_manager.has_index(table, col):
-                        p_meta["path"] = "secondary_index_range"
-                    else:
-                        p_meta["path"] = "seq_scan"
-            # 多条件：尝试复合（等值+范围）
-            elif len(flt) >= 2:
-                p_meta["path"] = "composite_index_range_or_seq"
-        elif p.get("type") == "SELECT" and p.get("joins"):
-            p_meta["path"] = "join"
+            # --- 成本估计：顺扫 vs 二级索引(内存) vs 主键索引(C++) ---
+            seq_cost = max(rows, 1)
+            # 主键索引是否可用（通过 C++ storage.has_index 判断是否存在主键列）
+            has_pk_index = False
+            try:
+                has_pk_index = bool(self.storage_engine.has_index(table))
+            except Exception:
+                pass
+
+            # 估计过滤选择性
+            sel = self._estimate_selectivity(table, flt) if flt else 1.0
+
+            idx_cost = int(rows * sel)
+            # 若为等值并且是典型主键列名，则优先考虑主键点查成本
+            pk_eq = None
+            if len(flt) == 1 and flt[0].get("op") == "=" and str(flt[0].get("column", "")).lower() in ("id", "pk", "primary", "primary_key"):
+                pk_eq = flt[0]
+
+            chosen = "seq_scan"; access_params = {}
+            if pk_eq and has_pk_index:
+                chosen = "index_scan"
+                access_params = {"pk_value": str(pk_eq.get("value", ""))}
+            else:
+                # 尝试使用我们内存二级索引的成本（命中即常数/很小开销）
+                can_secondary = False
+                if len(flt) == 1:
+                    col = flt[0].get("column", ""); op = flt[0].get("op")
+                    can_secondary = self.index_manager.has_index(table, col) and op in ("=", ">", ">=", "<", "<=")
+                if can_secondary:
+                    chosen = "secondary_index"
+                    idx_cost = max(1, int(rows * sel * 0.2))
+                # 主键范围
+                has_range = any(c.get("op") in (">", ">=", "<", "<=") and str(c.get("column", "")).lower() in ("id","pk","primary","primary_key") for c in flt)
+                if has_pk_index and has_range:
+                    chosen = "index_range_scan"
+
+            # 比较成本并写回计划
+            p_meta["cost_seq"] = seq_cost
+            p_meta["cost_idx"] = idx_cost
+            p_meta["chosen"] = chosen
+            if chosen == "index_scan":
+                p["access_method"] = "index_scan"
+                p["access_params"] = access_params
+            elif chosen == "index_range_scan":
+                # 简化构造边界
+                min_pk = ""; max_pk = "\xFF\xFF\xFF\xFF"
+                for c in flt:
+                    if str(c.get("column"," ")).lower() in ("id","pk","primary","primary_key"):
+                        if c.get("op") in (">", ">="):
+                            min_pk = str(c.get("value",""))
+                        elif c.get("op") in ("<", "<="):
+                            max_pk = str(c.get("value",""))
+                p["access_method"] = "index_range_scan"
+                p["access_params"] = {"min_pk": min_pk, "max_pk": max_pk}
+            # 二级索引路径不直接下推，由执行阶段的 _execute_with_index_optimization/HybridExecution 决定
+
+        # JOIN 算法选择（若存在）
+        if p.get("type") == "SELECT" and p.get("joins"):
+            # 简易策略：估计左/右表大小，大表倾向哈希，小表可用 merge
+            left = (p.get("tables") or [None, None])[0]
+            right = (p.get("tables") or [None, None])[1]
+            lsz = self._estimate_table_rows(left) if left else 0
+            rsz = self._estimate_table_rows(right) if right else 0
+            algo = "hash" if max(lsz, rsz) > 1000 else "merge"
+            p.setdefault("join_algo", algo)
+            p_meta["join_algo"] = algo
         return p
     
     # === 事务相关 ===

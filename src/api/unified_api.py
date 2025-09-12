@@ -69,6 +69,12 @@ class UnifiedDB:
             return self._db.rollback()
         return getattr(self.runner, "rollback", lambda: None)()
 
+    # --- 事务覆盖层观测 ---
+    def show_tx_overlay(self):
+        if hasattr(self.runner, "get_tx_overlay_snapshot"):
+            return self.runner.get_tx_overlay_snapshot()
+        return {"in_tx": False, "tables": {}}
+
     # --- 索引便捷方法（内存二级索引） ---
     def create_index(self, table: str, column: str, pk_column: str) -> bool:
         mgr = getattr(self.runner, "index_manager", None)

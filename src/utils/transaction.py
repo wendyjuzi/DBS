@@ -29,11 +29,13 @@ class TransactionManager:
     def __init__(self, wal: WALManager) -> None:
         self.wal = wal
         self._txns: Dict[str, Transaction] = {}
+        self._active: set[str] = set()
 
     def begin(self) -> Transaction:
         txn = Transaction()
         self._txns[txn.txid] = txn
         self.wal.append(LogRecord(txid=txn.txid, op="BEGIN"))
+        self._active.add(txn.txid)
         return txn
 
     def commit(self, txid: str) -> None:
@@ -42,6 +44,7 @@ class TransactionManager:
             return
         self.wal.append(LogRecord(txid=txid, op="COMMIT"))
         txn.state = TransactionState.COMMITTED
+        self._active.discard(txid)
 
     def rollback(self, txid: str) -> None:
         txn = self._ensure(txid)
@@ -50,11 +53,16 @@ class TransactionManager:
         # 简化：仅写 ABORT 标记，不做物化回滚
         self.wal.append(LogRecord(txid=txid, op="ABORT"))
         txn.state = TransactionState.ABORTED
+        self._active.discard(txid)
 
     # --- helpers ---
     def _ensure(self, txid: str) -> Transaction:
         if txid not in self._txns:
             self._txns[txid] = Transaction(txid)
         return self._txns[txid]
+
+    # --- observability ---
+    def get_active_txids(self) -> set[str]:
+        return set(self._active)
 
 

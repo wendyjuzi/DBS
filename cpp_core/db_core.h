@@ -377,6 +377,18 @@ private:
     };
     std::map<std::string, CompositeIndexInfo> composite_indexes;
 
+    // MVCC version chains: (table, pk) -> head pointer
+    struct VersionNode {
+        std::vector<std::string> values;
+        std::string xmin;
+        std::optional<std::string> xmax; // None means live
+        bool committed;
+        VersionNode* next;
+        VersionNode(const std::vector<std::string>& v, std::string tx, bool c)
+            : values(v), xmin(std::move(tx)), xmax(std::nullopt), committed(c), next(nullptr) {}
+    };
+    std::map<std::pair<std::string, std::string>, VersionNode*> mvcc_heads;
+
 public:
     StorageEngine() {
         // 初始化表的最大页ID（从磁盘读取已存在的页）
@@ -765,6 +777,7 @@ private:
         }
     }
 
+public:
     // 删除表的所有数据文件（DROP TABLE时调用）
     bool drop_table_data(const std::string& table_name) {
         bool success = true;
@@ -803,6 +816,90 @@ private:
         
         std::cout << "[CPP] 表数据清理完成: " << table_name << std::endl;
         return success;
+    }
+
+    // --- MVCC helpers ---
+    bool mvcc_insert_uncommitted(const std::string& table_name,
+                                 const std::vector<std::string>& row_values,
+                                 const std::string& txid,
+                                 size_t pk_index) {
+        if (pk_index >= row_values.size()) return false;
+        const std::string& pk = row_values[pk_index];
+        auto key = std::make_pair(table_name, pk);
+        VersionNode* head = nullptr;
+        auto it = mvcc_heads.find(key);
+        if (it != mvcc_heads.end()) head = it->second;
+        auto* node = new VersionNode(row_values, txid, false);
+        node->next = head;
+        mvcc_heads[key] = node;
+        return true;
+    }
+
+    bool mvcc_commit_insert(const std::string& table_name,
+                            const std::string& pk,
+                            const std::string& txid) {
+        auto it = mvcc_heads.find({table_name, pk});
+        if (it == mvcc_heads.end() || it->second == nullptr) return false;
+        VersionNode* head = it->second;
+        if (head->xmin == txid && !head->committed) {
+            head->committed = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool mvcc_rollback_insert(const std::string& table_name,
+                               const std::string& pk,
+                               const std::string& txid) {
+        auto it = mvcc_heads.find({table_name, pk});
+        if (it == mvcc_heads.end() || it->second == nullptr) return false;
+        VersionNode* head = it->second;
+        if (head->xmin == txid && !head->committed) {
+            mvcc_heads[{table_name, pk}] = head->next;
+            delete head;
+            return true;
+        }
+        return false;
+    }
+
+    bool mvcc_mark_delete_commit(const std::string& table_name,
+                                 const std::string& pk,
+                                 const std::string& txid) {
+        auto it = mvcc_heads.find({table_name, pk});
+        if (it == mvcc_heads.end()) return false;
+        VersionNode* cur = it->second;
+        while (cur) {
+            if (cur->committed && !cur->xmax.has_value()) {
+                cur->xmax = txid;
+                return true;
+            }
+            cur = cur->next;
+        }
+        return false;
+    }
+
+    std::optional<std::vector<std::string>> mvcc_lookup_visible(
+        const std::string& table_name,
+        const std::string& pk,
+        const std::string& reader_txid,
+        const std::vector<std::string>& active_txids) {
+        auto it = mvcc_heads.find({table_name, pk});
+        if (it == mvcc_heads.end()) return std::nullopt;
+        VersionNode* cur = it->second;
+        auto is_active = [&](const std::string& x){
+            return std::find(active_txids.begin(), active_txids.end(), x) != active_txids.end();
+        };
+        while (cur) {
+            if (!cur->committed) {
+                if (cur->xmin == reader_txid) return cur->values;
+            } else {
+                if (!cur->xmax.has_value() && !is_active(cur->xmin)) {
+                    return cur->values;
+                }
+            }
+            cur = cur->next;
+        }
+        return std::nullopt;
     }
 };
 
