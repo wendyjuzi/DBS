@@ -171,6 +171,9 @@ class ASTNode:
                 result["where"] = {"left": left, "op": op, "right": right}
             else:
                 result["where"] = None
+                
+        elif self.node_type == "DROP_TABLE":
+            result["table"] = self.value
         else:
             # 默认格式，用于其他类型的节点
             result["value"] = self.value
@@ -223,6 +226,8 @@ class Parser:
             return self.delete()
         elif self.current_token.lexeme.upper() == "UPDATE":
             return self.update()
+        elif self.current_token.lexeme.upper() == "DROP":
+            return self.drop_table()
         else:
             # 提供上下文信息给智能诊断
             context = f"statement_start:{self.current_token.lexeme}"
@@ -233,18 +238,101 @@ class Parser:
         self.expect("KEYWORD", "TABLE")
         table_name = self.expect("IDENTIFIER").lexeme
         self.expect("DELIMITER", "(")
+        
         columns = []
+        primary_keys = []
+        foreign_keys = []
+        constraints = {}
+        
         while True:
-            col_name = self.expect("IDENTIFIER").lexeme
-            col_type = self.expect("IDENTIFIER").lexeme
-            columns.append((col_name, col_type))
+            # 检查是否是约束定义
+            if (self.current_token and self.current_token.type == "KEYWORD" and 
+                self.current_token.lexeme.upper() in ["PRIMARY", "FOREIGN", "CONSTRAINT"]):
+                
+                if self.current_token.lexeme.upper() == "PRIMARY":
+                    # 解析 PRIMARY KEY (col1, col2, ...)
+                    self.advance()  # PRIMARY
+                    self.expect("KEYWORD", "KEY")
+                    self.expect("DELIMITER", "(")
+                    while True:
+                        pk_col = self.expect("IDENTIFIER").lexeme
+                        primary_keys.append(pk_col)
+                        if self.current_token.lexeme == ",":
+                            self.advance()
+                        else:
+                            break
+                    self.expect("DELIMITER", ")")
+                    
+                elif self.current_token.lexeme.upper() == "FOREIGN":
+                    # 解析 FOREIGN KEY (col) REFERENCES table(col)
+                    self.advance()  # FOREIGN
+                    self.expect("KEYWORD", "KEY")
+                    self.expect("DELIMITER", "(")
+                    fk_col = self.expect("IDENTIFIER").lexeme
+                    self.expect("DELIMITER", ")")
+                    self.expect("KEYWORD", "REFERENCES")
+                    ref_table = self.expect("IDENTIFIER").lexeme
+                    self.expect("DELIMITER", "(")
+                    ref_col = self.expect("IDENTIFIER").lexeme
+                    self.expect("DELIMITER", ")")
+                    
+                    foreign_keys.append({
+                        'column': fk_col,
+                        'references_table': ref_table,
+                        'references_column': ref_col
+                    })
+            else:
+                # 解析普通列定义
+                col_name = self.expect("IDENTIFIER").lexeme
+                col_type = self.expect("IDENTIFIER").lexeme
+                
+                # 检查列级约束
+                col_constraints = []
+                while (self.current_token and self.current_token.type == "KEYWORD" and 
+                       self.current_token.lexeme.upper() in ["PRIMARY", "NOT", "UNIQUE"]):
+                    
+                    if self.current_token.lexeme.upper() == "PRIMARY":
+                        self.advance()
+                        self.expect("KEYWORD", "KEY")
+                        primary_keys.append(col_name)
+                        col_constraints.append("PRIMARY_KEY")
+                        
+                    elif self.current_token.lexeme.upper() == "NOT":
+                        self.advance()
+                        self.expect("KEYWORD", "NULL")
+                        col_constraints.append("NOT_NULL")
+                        
+                    elif self.current_token.lexeme.upper() == "UNIQUE":
+                        self.advance()
+                        col_constraints.append("UNIQUE")
+                
+                columns.append((col_name, col_type))
+                if col_constraints:
+                    constraints[col_name] = col_constraints
+            
             if self.current_token.lexeme == ",":
                 self.advance()
             else:
                 break
+                
         self.expect("DELIMITER", ")")
         self.expect("DELIMITER", ";")
-        return ASTNode("CREATE_TABLE", table_name, [ASTNode("COLUMN", col_name + ":" + col_type) for col_name, col_type in columns])
+        
+        # 构建 AST 节点
+        children = [ASTNode("COLUMN", col_name + ":" + col_type) for col_name, col_type in columns]
+        
+        if primary_keys:
+            children.append(ASTNode("PRIMARY_KEY", ",".join(primary_keys)))
+            
+        for fk in foreign_keys:
+            fk_node = ASTNode("FOREIGN_KEY", f"{fk['column']}:{fk['references_table']}.{fk['references_column']}")
+            children.append(fk_node)
+            
+        for col_name, col_constraints in constraints.items():
+            for constraint in col_constraints:
+                children.append(ASTNode("CONSTRAINT", f"{col_name}:{constraint}"))
+        
+        return ASTNode("CREATE_TABLE", table_name, children)
 
     def insert(self):
         self.expect("KEYWORD", "INSERT")
@@ -280,14 +368,25 @@ class Parser:
     def select(self):
         self.expect("KEYWORD", "SELECT")
         
-        # 解析列名（支持 * 通配符）
+        # 解析列名（支持 * 通配符和聚合函数）
         columns = []
         while True:
             if self.current_token and self.current_token.type == "OPERATOR" and self.current_token.lexeme == "*":
                 columns.append("*")
                 self.advance()
+            elif self.current_token and self.current_token.lexeme.upper() in ["COUNT", "SUM", "AVG", "MAX", "MIN"]:
+                # 解析聚合函数
+                func_node = self.parse_aggregate_function()
+                columns.append(func_node)
             else:
-                columns.append(self.parse_qualified_identifier())
+                col_expr = self.parse_qualified_identifier()
+                # 检查是否有别名 (AS alias)
+                if self.current_token and self.current_token.lexeme.upper() == "AS":
+                    self.advance()  # 跳过 AS
+                    alias = self.expect("IDENTIFIER").lexeme
+                    columns.append(f"{col_expr} AS {alias}")
+                else:
+                    columns.append(col_expr)
             
             if self.current_token and self.current_token.lexeme == ",":
                 self.advance()
@@ -317,7 +416,14 @@ class Parser:
         self.expect("DELIMITER", ";")
         
         # 构建 AST
-        children = [ASTNode("COLUMN", c) for c in columns]
+        children = []
+        for c in columns:
+            # hasattr is safer than isinstance due to potential circular imports
+            if hasattr(c, 'node_type') and c.node_type == 'AGGREGATE':
+                children.append(c)
+            else:
+                children.append(ASTNode("COLUMN", c))
+
         children.append(from_clause)
         if where_node:
             children.append(where_node)
@@ -329,9 +435,20 @@ class Parser:
         return ASTNode("SELECT", None, children)
 
     def parse_from_clause(self):
-        """解析 FROM 子句，支持 JOIN"""
+        """解析 FROM 子句，支持 JOIN 和表别名"""
         table_name = self.expect("IDENTIFIER").lexeme
+        
+        # 检查是否有表别名
+        alias = None
+        if (self.current_token and 
+            self.current_token.type == "IDENTIFIER" and 
+            self.current_token.lexeme.upper() not in ["JOIN", "INNER", "LEFT", "RIGHT", "WHERE", "GROUP", "ORDER"]):
+            alias = self.current_token.lexeme
+            self.advance()
+        
         from_node = ASTNode("FROM", table_name)
+        if alias:
+            from_node.children.append(ASTNode("ALIAS", alias))
         
         # 检查是否有 JOIN
         while self.current_token and self.current_token.lexeme.upper() in ["JOIN", "INNER", "LEFT", "RIGHT"]:
@@ -350,6 +467,15 @@ class Parser:
             
         self.expect("KEYWORD", "JOIN")
         table_name = self.expect("IDENTIFIER").lexeme
+        
+        # 检查是否有表别名
+        alias = None
+        if (self.current_token and 
+            self.current_token.type == "IDENTIFIER" and 
+            self.current_token.lexeme.upper() != "ON"):
+            alias = self.current_token.lexeme
+            self.advance()
+        
         self.expect("KEYWORD", "ON", context="join_on_condition")
         
         # 解析 ON 条件
@@ -363,10 +489,12 @@ class Parser:
             ASTNode("RIGHT", right)
         ])
         
-        return ASTNode("JOIN", join_type, [
-            ASTNode("TABLE", table_name),
-            on_condition
-        ])
+        join_children = [ASTNode("TABLE", table_name)]
+        if alias:
+            join_children.append(ASTNode("ALIAS", alias))
+        join_children.append(on_condition)
+        
+        return ASTNode("JOIN", join_type, join_children)
 
     def parse_group_by(self):
         """解析 GROUP BY 子句"""
@@ -469,12 +597,155 @@ class Parser:
             return identifier
 
     def parse_where(self):
-        """解析 WHERE 子句，返回 WHERE 节点"""
+        """解析 WHERE 子句，支持复杂条件表达式"""
         self.advance()  # 跳过 WHERE
+        condition = self.parse_or_expression()
+        return ASTNode("WHERE", None, [condition])
+    
+    def parse_or_expression(self):
+        """解析 OR 表达式 (最低优先级)"""
+        left = self.parse_and_expression()
+        
+        while self.current_token and self.current_token.lexeme.upper() == "OR":
+            self.advance()  # 跳过 OR
+            right = self.parse_and_expression()
+            left = ASTNode("LOGICAL_OP", "OR", [left, right])
+        
+        return left
+    
+    def parse_and_expression(self):
+        """解析 AND 表达式"""
+        left = self.parse_not_expression()
+        
+        while self.current_token and self.current_token.lexeme.upper() == "AND":
+            self.advance()  # 跳过 AND
+            right = self.parse_not_expression()
+            left = ASTNode("LOGICAL_OP", "AND", [left, right])
+        
+        return left
+    
+    def parse_not_expression(self):
+        """解析 NOT 表达式"""
+        if self.current_token and self.current_token.lexeme.upper() == "NOT":
+            self.advance()  # 跳过 NOT
+            expr = self.parse_comparison_expression()
+            return ASTNode("LOGICAL_OP", "NOT", [expr])
+        else:
+            return self.parse_comparison_expression()
+    
+    def parse_comparison_expression(self):
+        """解析比较表达式"""
+        if self.current_token and self.current_token.lexeme == "(":
+            # 处理括号表达式
+            self.advance()  # 跳过 (
+            expr = self.parse_or_expression()
+            self.expect("DELIMITER", ")")
+            return expr
+        
+        # 解析左操作数
         left = self.parse_qualified_identifier()
+        
+        # 检查操作符类型
+        if not self.current_token:
+            raise ParseError("Expected operator after identifier")
+            
+        if self.current_token.lexeme.upper() == "BETWEEN":
+            return self.parse_between_expression(left)
+        elif self.current_token.lexeme.upper() == "IN":
+            return self.parse_in_expression(left)
+        elif self.current_token.lexeme.upper() == "LIKE":
+            return self.parse_like_expression(left)
+        elif self.current_token.type == "OPERATOR":
+            return self.parse_simple_comparison(left)
+        else:
+            raise ParseError(f"Unexpected token in WHERE clause: {self.current_token.lexeme}")
+    
+    def parse_simple_comparison(self, left):
+        """解析简单比较操作 (=, >, <, >=, <=, !=, <>)"""
         op = self.expect("OPERATOR").lexeme
-        right = self.expect("CONST").lexeme
-        return ASTNode("WHERE", None, [ASTNode("LEFT", left), ASTNode("OP", op), ASTNode("RIGHT", right)])
+        right = self.parse_value_or_identifier()
+        return ASTNode("COMPARISON", op, [ASTNode("LEFT", left), ASTNode("RIGHT", right)])
+    
+    def parse_between_expression(self, left):
+        """解析 BETWEEN 表达式"""
+        self.advance()  # 跳过 BETWEEN
+        start_val = self.parse_value_or_identifier()
+        self.expect("KEYWORD", "AND")
+        end_val = self.parse_value_or_identifier()
+        return ASTNode("BETWEEN", None, [
+            ASTNode("LEFT", left), 
+            ASTNode("START", start_val), 
+            ASTNode("END", end_val)
+        ])
+    
+    def parse_in_expression(self, left):
+        """解析 IN 表达式"""
+        self.advance()  # 跳过 IN
+        self.expect("DELIMITER", "(")
+        values = []
+        while True:
+            val = self.parse_value_or_identifier()
+            values.append(ASTNode("VALUE", val))
+            if self.current_token and self.current_token.lexeme == ",":
+                self.advance()
+            else:
+                break
+        self.expect("DELIMITER", ")")
+        return ASTNode("IN", None, [ASTNode("LEFT", left)] + values)
+    
+    def parse_like_expression(self, left):
+        """解析 LIKE 表达式"""
+        self.advance()  # 跳过 LIKE
+        pattern = self.parse_value_or_identifier()
+        return ASTNode("LIKE", None, [ASTNode("LEFT", left), ASTNode("PATTERN", pattern)])
+    
+    def parse_value_or_identifier(self):
+        """解析值或标识符"""
+        if self.current_token.type == "CONST":
+            val = self.current_token.lexeme
+            self.advance()
+            return val
+        elif self.current_token.type == "IDENTIFIER":
+            return self.parse_qualified_identifier()
+        else:
+            raise ParseError(f"Expected value or identifier, got {self.current_token.type}")
+    
+    def parse_aggregate_function(self):
+        """解析聚合函数 (COUNT, SUM, AVG, MAX, MIN)"""
+        func_name = self.current_token.lexeme.upper()
+        self.advance()  # 跳过函数名
+        
+        self.expect("DELIMITER", "(")
+        
+        # 处理参数
+        if func_name == "COUNT":
+            if self.current_token and self.current_token.lexeme == "*":
+                arg = "*"
+                self.advance()
+            elif self.current_token and self.current_token.lexeme.upper() == "DISTINCT":
+                self.advance()  # 跳过 DISTINCT
+                arg = f"DISTINCT {self.parse_qualified_identifier()}"
+            else:
+                arg = self.parse_qualified_identifier()
+        else:
+            # SUM, AVG, MAX, MIN 只接受列名
+            if self.current_token and self.current_token.lexeme.upper() == "DISTINCT":
+                self.advance()  # 跳过 DISTINCT
+                arg = f"DISTINCT {self.parse_qualified_identifier()}"
+            else:
+                arg = self.parse_qualified_identifier()
+        
+        self.expect("DELIMITER", ")")
+        
+        return ASTNode("AGGREGATE", func_name, [ASTNode("ARG", arg)])
+
+    def drop_table(self):
+        """解析 DROP TABLE 语句"""
+        self.expect("KEYWORD", "DROP")
+        self.expect("KEYWORD", "TABLE")
+        table_name = self.expect("IDENTIFIER").lexeme
+        self.expect("DELIMITER", ";")
+        return ASTNode("DROP_TABLE", table_name)
 
 # 测试
 if __name__ == "__main__":

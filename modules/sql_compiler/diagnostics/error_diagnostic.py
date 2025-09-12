@@ -73,6 +73,9 @@ class SmartErrorDiagnostic:
             'UPDAET': 'UPDATE',
             'DELET': 'DELETE',
             'DLEET': 'DELETE',
+            'DORP': 'DROP',
+            'DRPO': 'DROP',
+            'DRAP': 'DROP',
             'WHER': 'WHERE',
             'WHRE': 'WHERE',
             'FORM': 'FROM',
@@ -217,7 +220,7 @@ class SmartErrorDiagnostic:
             else:
                 # 模糊匹配SQL关键字
                 close_matches = difflib.get_close_matches(
-                    statement_word.upper(), ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE'], n=3, cutoff=0.6
+                    statement_word.upper(), ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP'], n=3, cutoff=0.6
                 )
                 for match in close_matches:
                     suggestions.append(ErrorSuggestion(
@@ -424,6 +427,61 @@ class SmartErrorDiagnostic:
                 fix_type="column_count_mismatch",
                 example="确保VALUES中的值数量与列数量相同"
             ))
+        
+        elif error_type == "PrimaryKeyError":
+            # 主键错误
+            if "缺少主键列" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="INSERT语句必须包含所有主键列的值",
+                    confidence=0.95,
+                    fix_type="missing_primary_key",
+                    example="INSERT INTO table(id, name) VALUES(1, 'John') -- id是主键"
+                ))
+            elif "不能为空" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="主键列的值不能为空或NULL",
+                    confidence=0.95,
+                    fix_type="null_primary_key",
+                    example="确保主键列有有效的非空值"
+                ))
+            elif "不存在于表定义中" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="主键引用的列必须在表中定义",
+                    confidence=0.9,
+                    fix_type="invalid_primary_key_column",
+                    example="检查PRIMARY KEY中的列名是否正确"
+                ))
+        
+        elif error_type == "ForeignKeyError":
+            # 外键错误
+            if "不存在于表定义中" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="外键列必须在当前表中定义",
+                    confidence=0.9,
+                    fix_type="invalid_foreign_key_column",
+                    example="确保FOREIGN KEY中的列名在表中存在"
+                ))
+            elif "引用的表" in message and "不存在" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="外键引用的表必须已经存在",
+                    confidence=0.9,
+                    fix_type="missing_referenced_table",
+                    example="先创建被引用的表，再创建包含外键的表"
+                ))
+            elif "引用的列" in message and "不存在" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="外键引用的列必须在目标表中存在",
+                    confidence=0.9,
+                    fix_type="missing_referenced_column",
+                    example="检查REFERENCES中的列名是否正确"
+                ))
+            elif "无法删除表" in message:
+                suggestions.append(ErrorSuggestion(
+                    suggestion="不能删除被其他表外键引用的表",
+                    confidence=0.95,
+                    fix_type="foreign_key_dependency",
+                    example="先删除引用此表的外键约束，再删除表"
+                ))
 
         return DiagnosticResult(
             error_type="SemanticError",

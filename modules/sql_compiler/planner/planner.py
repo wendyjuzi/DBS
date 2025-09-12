@@ -153,6 +153,9 @@ class Planner:
             root.add_child(scan)
         return root
 
+    def plan_drop(self, ast):
+        return LogicalPlan("DropTable", table=ast["table"])
+
 
 if __name__ == "__main__":
     # 假设 parser 生成了 AST
