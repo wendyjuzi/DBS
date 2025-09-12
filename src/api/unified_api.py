@@ -53,4 +53,29 @@ class UnifiedDB:
     def flush(self) -> None:
         self._db.flush()
 
+    # --- 事务便捷方法 ---
+    def begin(self) -> str:
+        if hasattr(self._db, "begin"):
+            return self._db.begin()
+        return getattr(self.runner, "begin", lambda: "")()
+
+    def commit(self) -> None:
+        if hasattr(self._db, "commit"):
+            return self._db.commit()
+        return getattr(self.runner, "commit", lambda: None)()
+
+    def rollback(self) -> None:
+        if hasattr(self._db, "rollback"):
+            return self._db.rollback()
+        return getattr(self.runner, "rollback", lambda: None)()
+
+    # --- 索引便捷方法（内存二级索引） ---
+    def create_index(self, table: str, column: str, pk_column: str) -> bool:
+        mgr = getattr(self.runner, "index_manager", None)
+        return bool(mgr and mgr.create_index(table, column, pk_column))
+
+    def drop_index(self, table: str, column: str) -> bool:
+        mgr = getattr(self.runner, "index_manager", None)
+        return bool(mgr and mgr.drop_index(table, column))
+
 

@@ -29,10 +29,23 @@ PYBIND11_MODULE(db_core, m) {
     // 4. 绑定StorageEngine类
     py::class_<StorageEngine>(m, "StorageEngine")
         .def(py::init<>())
+
+        // 基础存储接口
         .def("flush_all_dirty_pages", &StorageEngine::flush_all_dirty_pages)
         .def("has_index", &StorageEngine::has_index)
         .def("get_table_columns", &StorageEngine::get_table_columns)
-        .def("get_index_size", &StorageEngine::get_index_size);
+        .def("get_index_size", &StorageEngine::get_index_size)
+
+        // 复合索引接口
+        .def("enable_composite_index", &StorageEngine::enable_composite_index,
+             py::arg("table_name"), py::arg("indices"))
+        .def("composite_index_range_row_values", &StorageEngine::composite_index_range_row_values,
+             py::arg("table_name"), py::arg("min_key"), py::arg("max_key"))
+        .def("drop_composite_index", &StorageEngine::drop_composite_index, py::arg("table_name"))
+        .def("get_composite_index_columns", &StorageEngine::get_composite_index_columns, py::arg("table_name"));
+
+    // 模块属性：能力标识
+    m.attr("_has_composite_persist") = true;
 
     // 5. 绑定ExecutionEngine类（核心接口）
     py::class_<ExecutionEngine>(m, "ExecutionEngine")
@@ -59,6 +72,8 @@ PYBIND11_MODULE(db_core, m) {
              py::arg("table_name"), py::arg("pk_value"))
         .def("index_range_scan", &ExecutionEngine::index_range_scan, 
              py::arg("table_name"), py::arg("min_pk"), py::arg("max_pk"))
+        .def("composite_index_range_scan", &ExecutionEngine::composite_index_range_scan, 
+             py::arg("table_name"), py::arg("min_key"), py::arg("max_key"))
         // 额外接口：下推过滤与批量插入（合并到同一个定义链，避免重复定义类）
         .def("filter_conditions", &ExecutionEngine::filter_conditions,
              py::arg("table_name"), py::arg("conditions"))
@@ -68,6 +83,8 @@ PYBIND11_MODULE(db_core, m) {
         .def("update_rows", &ExecutionEngine::update_rows,
              py::arg("table_name"), py::arg("set_clauses"), py::arg("where_predicate"))
         .def("inner_join", &ExecutionEngine::inner_join,
+             py::arg("left_table"), py::arg("right_table"), py::arg("left_col"), py::arg("right_col"))
+        .def("merge_join", &ExecutionEngine::merge_join,
              py::arg("left_table"), py::arg("right_table"), py::arg("left_col"), py::arg("right_col"))
         .def("order_by", &ExecutionEngine::order_by,
              py::arg("table_name"), py::arg("order_clauses"))

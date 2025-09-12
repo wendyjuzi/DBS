@@ -73,6 +73,16 @@ class DatabaseAPI:
         except Exception:
             pass
 
+    # --- 事务 API ---
+    def begin(self) -> str:
+        return getattr(self._runner, "begin")()
+
+    def commit(self) -> None:
+        return getattr(self._runner, "commit")()
+
+    def rollback(self) -> None:
+        return getattr(self._runner, "rollback")()
+
 # --- compat helpers for REST layer ---
 _db_singleton = None
 

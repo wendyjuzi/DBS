@@ -18,6 +18,7 @@ from modules.sql_compiler.semantic.semantic import SemanticAnalyzer, Catalog
 from modules.sql_compiler.planner.planner import Planner
 from src.core.executor.hybrid_executor import HybridExecutionEngine
 from src.utils.exceptions import ExecutionError, SQLSyntaxError
+from src.index.index_manager import IndexManager
 
 # 导入混合存储引擎
 import sys
@@ -33,6 +34,10 @@ class SQLCompilerAdapter:
         # 初始化SQL编译器组件
         self.catalog = Catalog()
         self.semantic_analyzer = SemanticAnalyzer(self.catalog)
+        # 事务状态与缓冲（仅对 INSERT 做批量缓冲以优化性能）
+        self.in_transaction: bool = False
+        self.autocommit: bool = True
+        self._txn_insert_buffer: Dict[str, List[List[str]]] = {}
         
         # 初始化存储引擎
         if use_hybrid_storage:
@@ -77,6 +82,8 @@ class SQLCompilerAdapter:
             except ImportError as e:
                 print(f"[ADAPTER] C++执行引擎初始化失败: {e}")
                 raise ExecutionError("C++执行引擎不可用")
+        # 索引管理器
+        self.index_manager = IndexManager()
     
     def _convert_plan_to_executor_format(self, compiler_plan) -> Dict[str, Any]:
         """
@@ -256,6 +263,30 @@ class SQLCompilerAdapter:
         # 预处理SQL语句：去除首尾空白，标准化换行符
         sql = sql.strip()
         print(f"[ADAPTER] 执行SQL: {sql}")
+        # 简易事务控制语句直通处理
+        upper_sql = sql.upper().rstrip(';')
+        if upper_sql == "BEGIN":
+            return self._begin_transaction()
+        if upper_sql == "COMMIT":
+            return self._commit_transaction()
+        if upper_sql == "ROLLBACK":
+            return self._rollback_transaction()
+        if upper_sql.startswith("SET AUTOCOMMIT"):
+            return self._set_autocommit(upper_sql)
+        if upper_sql == "SHOW TRANSACTION":
+            return self._show_transaction()
+        if upper_sql.startswith("CREATE INDEX"):
+            return self._handle_create_index(sql)
+        if upper_sql.startswith("CREATE COMPOSITE INDEX"):
+            return self._handle_create_composite_index(sql)
+        if upper_sql.startswith("DROP INDEX"):
+            return self._handle_drop_index(sql)
+        if upper_sql.startswith("DROP COMPOSITE INDEX"):
+            return self._handle_drop_composite_index(sql)
+        if upper_sql == "SHOW INDEXES":
+            return self._handle_show_indexes()
+        if upper_sql == "SHOW COMPOSITE INDEXES":
+            return self._handle_show_composite_indexes()
         
         try:
             # 1. 词法分析
@@ -295,6 +326,15 @@ class SQLCompilerAdapter:
             
             print(f"[ADAPTER] 编译器计划生成成功，生成 {len(compiler_plans)} 个计划")
             
+            # EXPLAIN: 仅做计划转换和路径选择，返回解释信息
+            if sql.upper().startswith("EXPLAIN "):
+                results = []
+                for compiler_plan in compiler_plans:
+                    executor_plan = self._convert_plan_to_executor_format(compiler_plan)
+                    chosen = self._choose_path(executor_plan)
+                    results.append({"plan": executor_plan, "explain": chosen.get("_explain", {})})
+                return {"affected_rows": 0, "data": [[str(r["plan"]), str(r["explain"])] for r in results], "metadata": {"columns": ["plan", "explain"]}}
+
             # 5. 转换计划格式并执行
             results = []
             for compiler_plan in compiler_plans:
@@ -304,22 +344,327 @@ class SQLCompilerAdapter:
                 executor_plan = self._convert_plan_to_executor_format(compiler_plan)
                 print(f"[ADAPTER] 转换后计划: {executor_plan}")
                 
-                # 执行计划
-                result = self.hybrid_executor.execute(executor_plan)
+                # 事务期内对 INSERT 进行缓冲，其他语句直接执行
+                if self.in_transaction and executor_plan.get("type") == "INSERT":
+                    table = executor_plan.get("table")
+                    values = executor_plan.get("values", [])
+                    if table and values:
+                        self._txn_insert_buffer.setdefault(table, []).append(values)
+                        print(f"[ADAPTER][TXN] 缓冲 INSERT -> {table}: {values}")
+                        result = {"affected_rows": 1, "metadata": {"message": "已加入事务缓冲 (INSERT)"}}
+                    else:
+                        result = {"affected_rows": 0, "metadata": {"message": "INSERT 语句不完整，已忽略"}}
+                else:
+                    # 在非事务或不缓冲的语句直接执行，带路径选择与EXPLAIN
+                    result = self._execute_with_index_optimization(self._choose_path(executor_plan))
                 results.append(result)
-            
+
             # 返回最后一个结果（通常是主要结果）
             if results:
                 return results[-1]
             else:
                 return {"status": "success", "affected_rows": 0, "data": []}
-                
+
         except ParseError as e:
             print(f"[ADAPTER] 语法分析错误: {e}")
             raise SQLSyntaxError(f"语法分析错误: {e}")
         except Exception as e:
             print(f"[ADAPTER] 执行错误: {e}")
             raise ExecutionError(f"SQL执行错误: {e}")
+
+    # === 路径选择与 EXPLAIN ===
+    def _estimate_table_rows(self, table: str) -> int:
+        try:
+            # 简易估计：用最大页ID近似行数（可替换为统计信息）
+            return int(self.hybrid_executor.storage.get_index_size(table)) if hasattr(self.hybrid_executor.storage, 'get_index_size') else 0
+        except Exception:
+            return 0
+
+    def _choose_path(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        p = dict(plan)
+        p_meta = p.setdefault("_explain", {})
+        if p.get("type") == "SELECT":
+            table = p.get("table", "")
+            flt = p.get("filter") or []
+            rows = self._estimate_table_rows(table)
+            p_meta["table_rows_estimate"] = rows
+            # 单条件：等值优先点查；范围优先范围/批量回表
+            if len(flt) == 1:
+                op = flt[0].get("op"); col = flt[0].get("column", "")
+                if op == "=":
+                    if self.index_manager.has_index(table, col):
+                        p_meta["path"] = "secondary_index_eq"
+                    else:
+                        p_meta["path"] = "seq_scan"
+                elif op in (">", ">=", "<", "<="):
+                    if self.index_manager.has_index(table, col):
+                        p_meta["path"] = "secondary_index_range"
+                    else:
+                        p_meta["path"] = "seq_scan"
+            # 多条件：尝试复合（等值+范围）
+            elif len(flt) >= 2:
+                p_meta["path"] = "composite_index_range_or_seq"
+        elif p.get("type") == "SELECT" and p.get("joins"):
+            p_meta["path"] = "join"
+        return p
+    
+    # === 事务相关 ===
+    def _begin_transaction(self) -> Dict[str, Any]:
+        if self.in_transaction:
+            return {"affected_rows": 0, "metadata": {"message": "已在事务中"}}
+        self.in_transaction = True
+        self.autocommit = False
+        self._txn_insert_buffer.clear()
+        print("[ADAPTER][TXN] BEGIN")
+        return {"affected_rows": 0, "metadata": {"message": "事务已开始"}}
+    
+    def _commit_transaction(self) -> Dict[str, Any]:
+        if not self.in_transaction:
+            return {"affected_rows": 0, "metadata": {"message": "当前不在事务中"}}
+        total = 0
+        # 批量提交 INSERT 以优化性能
+        for table, rows in list(self._txn_insert_buffer.items()):
+            if not rows:
+                continue
+            try:
+                print(f"[ADAPTER][TXN] COMMIT -> 批量插入 {table}: {len(rows)} 行")
+                count = int(self.hybrid_executor.insert_many(table, rows))
+                # 批量更新索引
+                cols = self.hybrid_executor.table_columns.get(table, [])
+                for r in rows:
+                    self.index_manager.on_insert(table, r, cols)
+            except Exception as e:
+                print(f"[ADAPTER][TXN] 批量插入失败，回退逐行: {e}")
+                count = 0
+                for r in rows:
+                    try:
+                        ok = self.hybrid_executor.executor.insert(table, r)
+                        if ok:
+                            count += 1
+                            # 更新索引
+                            cols = self.hybrid_executor.table_columns.get(table, [])
+                            self.index_manager.on_insert(table, r, cols)
+                    except Exception:
+                        pass
+            total += count
+        self._txn_insert_buffer.clear()
+        self.in_transaction = False
+        # 保持 autocommit 当前值不变
+        print(f"[ADAPTER][TXN] COMMIT 完成, 插入 {total} 行")
+        return {"affected_rows": total, "metadata": {"message": f"事务已提交 (批量插入 {total} 行)"}}
+    
+    def _rollback_transaction(self) -> Dict[str, Any]:
+        if not self.in_transaction:
+            return {"affected_rows": 0, "metadata": {"message": "当前不在事务中"}}
+        # 丢弃缓冲的 INSERT
+        discarded = sum(len(v) for v in self._txn_insert_buffer.values())
+        self._txn_insert_buffer.clear()
+        self.in_transaction = False
+        print(f"[ADAPTER][TXN] ROLLBACK, 丢弃缓冲 INSERT {discarded} 行")
+        return {"affected_rows": 0, "metadata": {"message": f"事务已回滚 (丢弃 {discarded} 条 INSERT)"}}
+
+    def _set_autocommit(self, upper_sql: str) -> Dict[str, Any]:
+        # 允许: SET AUTOCOMMIT = ON|OFF 或 1|0
+        val = upper_sql.split('=')[-1].strip()
+        on_vals = {"ON", "1", "TRUE"}
+        off_vals = {"OFF", "0", "FALSE"}
+        if val in on_vals:
+            self.autocommit = True
+            msg = "AUTOCOMMIT=ON"
+        elif val in off_vals:
+            self.autocommit = False
+            msg = "AUTOCOMMIT=OFF"
+        else:
+            msg = "无效的 AUTOCOMMIT 值, 仅支持 ON/OFF/1/0"
+        print(f"[ADAPTER][TXN] {msg}")
+        return {"affected_rows": 0, "metadata": {"message": msg}}
+
+    def _show_transaction(self) -> Dict[str, Any]:
+        state = {
+            "in_transaction": self.in_transaction,
+            "autocommit": self.autocommit,
+            "buffered_inserts": {k: len(v) for k, v in self._txn_insert_buffer.items()}
+        }
+        return {"affected_rows": 0, "data": [], "metadata": {"message": str(state)}}
+
+    # === 索引相关 ===
+    def _parse_ident(self, token: str) -> str:
+        return token.strip().strip('`"[]')
+
+    def _handle_create_index(self, sql: str) -> Dict[str, Any]:
+        # 语法（简化版）：CREATE INDEX idx ON table(col) PK pkcol;
+        up = sql.strip().rstrip(';')
+        try:
+            # 粗略解析
+            # 找到 ON 与 PK 关键字
+            on_pos = up.upper().find(" ON ")
+            pk_pos = up.upper().find(" PK ")
+            if on_pos == -1 or pk_pos == -1 or pk_pos < on_pos:
+                raise ValueError("语法: CREATE INDEX idx ON table(col) PK pkcol;")
+            on_part = up[on_pos + 4: pk_pos].strip()
+            pk_part = up[pk_pos + 4:].strip()
+            # on_part 形如: table(col)
+            table = on_part.split('(')[0].strip()
+            col = on_part[on_part.find('(')+1:on_part.rfind(')')].strip()
+            pkcol = pk_part
+            ok = self.index_manager.create_index(self._parse_ident(table), self._parse_ident(col), self._parse_ident(pkcol))
+            msg = "索引已存在" if not ok else "索引创建成功"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"CREATE INDEX 解析失败: {e}")
+
+    def _handle_drop_index(self, sql: str) -> Dict[str, Any]:
+        # 语法（简化版）：DROP INDEX table(col);
+        up = sql.strip().rstrip(';')
+        try:
+            if up.upper().startswith("DROP INDEX"):
+                spec = up[len("DROP INDEX"):].strip()
+                table = spec.split('(')[0].strip()
+                col = spec[spec.find('(')+1:spec.rfind(')')].strip()
+                existed = self.index_manager.drop_index(self._parse_ident(table), self._parse_ident(col))
+                msg = "索引不存在" if not existed else "索引已删除"
+                return {"affected_rows": 0, "metadata": {"message": msg}}
+            raise ValueError("语法: DROP INDEX table(col);")
+        except Exception as e:
+            raise SQLSyntaxError(f"DROP INDEX 解析失败: {e}")
+
+    def _handle_drop_composite_index(self, sql: str) -> Dict[str, Any]:
+        # 语法（简化版）：DROP COMPOSITE INDEX ON table;
+        up = sql.strip().rstrip(';')
+        try:
+            s = up.upper()
+            if not s.startswith("DROP COMPOSITE INDEX"):
+                raise ValueError("语法: DROP COMPOSITE INDEX ON table;")
+            on_pos = s.find(" ON ")
+            if on_pos == -1:
+                raise ValueError("缺少 ON 关键字")
+            table = up[on_pos + 4:].strip()
+            ok = bool(self.storage_engine.drop_composite_index(table))
+            msg = "复合索引已删除" if ok else "复合索引不存在"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"DROP COMPOSITE INDEX 解析失败: {e}")
+
+    def _handle_show_indexes(self) -> Dict[str, Any]:
+        items = self.index_manager.get_indexes()
+        return {"affected_rows": len(items), "data": [[it["table"], it["column"], it["pk_column"]] for it in items], "metadata": {"columns": ["table", "column", "pk"]}}
+
+    def _handle_show_composite_indexes(self) -> Dict[str, Any]:
+        # 返回每张表的复合索引列下标
+        try:
+            table_names = list(self.storage_engine.get_table_names()) if hasattr(self.storage_engine, 'get_table_names') else []
+            rows = []
+            for t in table_names:
+                cols = list(self.storage_engine.get_composite_index_columns(t)) if hasattr(self.storage_engine, 'get_composite_index_columns') else []
+                if cols:
+                    rows.append([t, ','.join(str(i) for i in cols)])
+            return {"affected_rows": len(rows), "data": rows, "metadata": {"columns": ["table", "col_indices"]}}
+        except Exception as e:
+            raise ExecutionError(f"SHOW COMPOSITE INDEXES 失败: {e}")
+
+    def _handle_create_composite_index(self, sql: str) -> Dict[str, Any]:
+        # 语法（简化版）：CREATE COMPOSITE INDEX idx ON table(col1,col2,...);
+        up = sql.strip().rstrip(';')
+        try:
+            s = up.upper()
+            if not s.startswith("CREATE COMPOSITE INDEX"):
+                raise ValueError("语法: CREATE COMPOSITE INDEX idx ON table(col1,col2,...);")
+            on_pos = s.find(" ON ")
+            if on_pos == -1:
+                raise ValueError("缺少 ON 关键字")
+            spec = up[on_pos + 4:].strip()
+            table = spec.split('(')[0].strip()
+            cols_str = spec[spec.find('(')+1:spec.rfind(')')].strip()
+            col_names = [self._parse_ident(c.strip()) for c in cols_str.split(',') if c.strip()]
+            if not table or not col_names:
+                raise ValueError("未解析到表名或列名")
+            # 将列名转换为下标序列
+            cpp_cols = list(self.storage_engine.get_table_columns(table))
+            indices = []
+            for cn in col_names:
+                if cn not in cpp_cols:
+                    raise ValueError(f"列不存在: {cn}")
+                indices.append(int(cpp_cols.index(cn)))
+            ok = bool(self.storage_engine.enable_composite_index(table, indices))
+            msg = "复合索引创建成功" if ok else "复合索引已存在或创建失败"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"CREATE COMPOSITE INDEX 解析失败: {e}")
+
+    def _execute_with_index_optimization(self, executor_plan: Dict[str, Any]) -> Dict[str, Any]:
+        # 对 SELECT 的等值/范围过滤进行索引优化
+        try:
+            if executor_plan.get("type") == "SELECT":
+                table = executor_plan.get("table", "")
+                flt = executor_plan.get("filter") or []
+                # 单个条件优化：等值或范围
+                if table and len(flt) == 1:
+                    col = flt[0].get("column", "")
+                    op = flt[0].get("op")
+                    val = flt[0].get("value")
+                    if self.index_manager.has_index(table, col):
+                        if op == "=":
+                            pk_values = self.index_manager.lookup_pks(table, col, str(val))
+                            if len(pk_values) == 1:
+                                # 改写为索引点查
+                                executor_plan = dict(executor_plan)
+                                executor_plan["access_method"] = "index_scan"
+                                executor_plan["access_params"] = {"pk_value": pk_values[0]}
+                        elif op in (">", ">=", "<", "<="):
+                            # 映射为范围
+                            min_val = None; max_val = None; inc_min = True; inc_max = True
+                            if op in (">", ">="):
+                                min_val = val; inc_min = (op == ">=")
+                            else:
+                                max_val = val; inc_max = (op == "<=")
+                            pk_values = self.index_manager.range_lookup_pks(table, col, min_val, max_val, inc_min, inc_max)
+                            if pk_values:
+                                # 使用批量主键回表
+                                target_columns = executor_plan.get("columns", ["*"])
+                                return self.hybrid_executor.select_by_pk_values(table, target_columns, pk_values)
+                # 复合条件优化（雏形）：等值(c1) + 范围(c2) → 复合键范围
+                if table and len(flt) >= 2:
+                    # 找到一个等值和一个范围条件
+                    eq_cond = None; rng_cond = None
+                    for cond in flt:
+                        if cond.get("op") == "=":
+                            eq_cond = cond
+                        elif cond.get("op") in (">", ">=", "<", "<="):
+                            rng_cond = cond
+                    if eq_cond and rng_cond:
+                        c1 = eq_cond.get("column", ""); v1 = str(eq_cond.get("value", ""))
+                        c2 = rng_cond.get("column", ""); v2 = str(rng_cond.get("value", ""))
+                        # 复合键使用相同分隔符（与C++保持一致）
+                        sep = "\x1F"
+                        if rng_cond.get("op") in (">", ">="):
+                            min_key = v1 + sep + v2
+                            max_key = v1 + sep + "\xFF\xFF\xFF\xFF"
+                        else:
+                            min_key = v1 + sep + "\x00"
+                            max_key = v1 + sep + v2
+                        try:
+                            rows = self.hybrid_executor.executor.composite_index_range_scan(table, min_key, max_key)
+                            target_columns = executor_plan.get("columns", ["*"])
+                            try:
+                                data = self.hybrid_executor.executor.project(table, rows, target_columns)
+                            except Exception:
+                                data = [r.get_values() for r in rows]
+                            return {"data": data, "affected_rows": len(data), "metadata": {"columns": target_columns}}
+                        except Exception:
+                            pass
+            res = self.hybrid_executor.execute(executor_plan)
+            # 钩子：INSERT 后更新索引（仅非事务立即生效；事务内在 COMMIT 时做批量）
+            if executor_plan.get("type") == "INSERT" and not self.in_transaction:
+                try:
+                    table = executor_plan.get("table")
+                    values = executor_plan.get("values", [])
+                    cols = self.hybrid_executor.table_columns.get(table, [])
+                    self.index_manager.on_insert(table, values, cols)
+                except Exception:
+                    pass
+            return res
+        except Exception as e:
+            raise ExecutionError(f"索引优化执行失败: {e}")
     
     def flush(self):
         """刷盘所有脏页"""
