@@ -1087,8 +1087,17 @@ class Parser:
         # 触发器主体: BEGIN ... END 或单个语句
         trigger_body = self.parse_trigger_body()
         
-        # 触发器定义不需要额外的分隔符，因为触发器内部的语句已经以分号结束了
-        # self.expect_delimiter()
+        # 防御性同步：如果此时仍然停留在 END（极端情况下主体未消费），则手动消费 END 和其后分号
+        consumed_end = False
+        if self.current_token and self.current_token.type == "KEYWORD" and self.current_token.lexeme.upper() == "END":
+            self.advance()
+            if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+                self.advance()
+            consumed_end = True
+        
+        # 正常情况下，使用当前语句分隔符结束 CREATE TRIGGER 语句
+        if not consumed_end:
+            self.expect_delimiter()
         
         # 构建 AST 节点
         trigger_node = ASTNode("CREATE_TRIGGER", trigger_name)
@@ -1098,7 +1107,7 @@ class Parser:
         trigger_node.children.append(ASTNode("FOR_EACH_ROW", str(for_each_row)))
         
         if when_condition:
-            trigger_node.children.append(when_condition)
+            trigger_node.children.append(ASTNode("WHEN_CONDITION", None, [when_condition]))
         
         trigger_node.children.append(trigger_body)
         
@@ -1126,23 +1135,43 @@ class Parser:
     
     def parse_trigger_condition(self):
         """解析触发器 WHEN 条件"""
-        # 简化版本：支持基本的比较表达式
-        # 例如: WHEN OLD.price != NEW.price
-        left_operand = self.parse_trigger_operand()
+        # 支持复杂的逻辑表达式，如: WHEN NEW.salary > OLD.salary AND NEW.salary > 50000
+        return self.parse_trigger_or_expression()
+    
+    def parse_trigger_or_expression(self):
+        """解析触发器 OR 表达式"""
+        left = self.parse_trigger_and_expression()
+        
+        while self.current_token and self.current_token.lexeme.upper() == "OR":
+            self.advance()  # 跳过 OR
+            right = self.parse_trigger_and_expression()
+            left = ASTNode("LOGICAL_OP", "OR", [left, right])
+        
+        return left
+    
+    def parse_trigger_and_expression(self):
+        """解析触发器 AND 表达式"""
+        left = self.parse_trigger_comparison()
+        
+        while self.current_token and self.current_token.lexeme.upper() == "AND":
+            self.advance()  # 跳过 AND
+            right = self.parse_trigger_comparison()
+            left = ASTNode("LOGICAL_OP", "AND", [left, right])
+        
+        return left
+    
+    def parse_trigger_comparison(self):
+        """解析触发器比较表达式"""
+        left = self.parse_trigger_operand()
         
         if self.current_token and self.current_token.type == "OPERATOR":
             operator = self.current_token.lexeme
             self.advance()
-            right_operand = self.parse_trigger_operand()
-            
-            condition_node = ASTNode("WHEN_CONDITION")
-            condition_node.children.append(ASTNode("LEFT", left_operand))
-            condition_node.children.append(ASTNode("OPERATOR", operator))
-            condition_node.children.append(ASTNode("RIGHT", right_operand))
-            return condition_node
+            right = self.parse_trigger_operand()
+            return ASTNode("COMPARISON", operator, [ASTNode("LEFT", left), ASTNode("RIGHT", right)])
         else:
             # 单个操作数作为条件
-            return ASTNode("WHEN_CONDITION", left_operand)
+            return left
     
     def parse_trigger_operand(self):
         """解析触发器操作数（支持 OLD.column, NEW.column）"""
@@ -1153,9 +1182,13 @@ class Parser:
             column = self.expect("IDENTIFIER").lexeme
             return f"{prefix}.{column}"
         elif self.current_token and self.current_token.type == "IDENTIFIER":
-            return self.current_token.lexeme
+            val = self.current_token.lexeme
+            self.advance()
+            return val
         elif self.current_token and self.current_token.type == "CONST":
-            return self.current_token.lexeme
+            val = self.current_token.lexeme
+            self.advance()
+            return val
         else:
             raise ParseError("Expected operand in trigger condition", self.current_token, "trigger_operand")
     
@@ -1172,9 +1205,6 @@ class Parser:
                 statements.append(stmt)
             
             self.expect("KEYWORD", "END")
-            # END 后面可能有分号，需要消费掉
-            if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
-                self.advance()
             
             body_node = ASTNode("TRIGGER_BODY")
             for stmt in statements:
