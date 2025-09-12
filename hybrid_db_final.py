@@ -668,6 +668,15 @@ class HybridExecutionEngine:
             for pattern in patterns:
                 processed_clause = re.sub(pattern, f"x[{col_idx}]", processed_clause)
         
+        # 归一化逻辑运算符 AND/OR/NOT → and/or/not
+        processed_clause = re.sub(r"\bAND\b", "and", processed_clause, flags=re.IGNORECASE)
+        processed_clause = re.sub(r"\bOR\b", "or", processed_clause, flags=re.IGNORECASE)
+        processed_clause = re.sub(r"\bNOT\b", "not", processed_clause, flags=re.IGNORECASE)
+
+        # 归一化比较运算符：处理 <> 为 != ，并将单独的 = 转为 == （避免 >=、<=、!=、==）
+        processed_clause = re.sub(r"<>", "!=", processed_clause)
+        processed_clause = re.sub(r"(?<![<>!=])=(?![=])", "==", processed_clause)
+
         # 处理字符串比较（添加引号）
         processed_clause = self._process_string_comparisons(processed_clause)
         

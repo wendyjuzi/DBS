@@ -14,6 +14,9 @@ ext_modules = [
             pybind11.get_cmake_dir() + "/../../../include",
         ],
         cxx_std=17,
+        extra_compile_args=[
+            "/utf-8",
+        ],
     ),
 ]
 

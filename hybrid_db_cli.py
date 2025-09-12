@@ -16,6 +16,7 @@ sys.path.insert(0, str(proj_root))
 
 # 导入现有组件
 from src.api.sql_compiler_adapter import SQLCompilerAdapter
+from src.core.hybrid_engine import HybridDatabaseEngine
 from src.utils.exceptions import ExecutionError, SQLSyntaxError
 
 
@@ -26,13 +27,17 @@ class HybridDatabaseCLI:
         """初始化CLI"""
         try:
             print("正在初始化混合架构数据库系统...")
+            # 两套后端：编译器适配器路径、核心混合引擎路径
             self.adapter = SQLCompilerAdapter()
+            self.core_engine = HybridDatabaseEngine()
+            self.mode = "adapter"  # adapter | core
             print("=== 混合架构数据库系统 (SQL编译器 + C++执行引擎) ===")
             print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE, DROP TABLE")
             print("输入 'exit' 退出, 'help' 查看帮助, 'tables' 显示所有表")
             print("输入 'cache' 查看缓存统计, 'flushcache' 刷新缓存到磁盘")
             print("输入 'BEGIN' 开启事务, 'COMMIT' 提交, 'ROLLBACK' 回滚")
             print("输入 'SHOW TRANSACTION' 查看事务状态, 'SET AUTOCOMMIT = ON|OFF' 设置自动提交")
+            print("输入 'MODE ADAPTER|CORE' 切换执行后端 (当前: adapter)")
             print("注意: 适配 modules/sql_compiler 的语法限制\n")
         except Exception as e:
             print(f"数据库初始化失败: {str(e)}")
@@ -84,6 +89,15 @@ class HybridDatabaseCLI:
                         self._flush_cache()
                         break
 
+                    if line.lower() == "show overlay":
+                        self._show_tx_overlay()
+                        break
+
+                    # 切换后端模式
+                    if line.upper().startswith("MODE "):
+                        self._switch_mode(line)
+                        break
+
                     # 事务控制命令（大小写不敏感，直接交给适配器处理）
                     if line.upper() in ("BEGIN", "COMMIT", "ROLLBACK", "SHOW TRANSACTION") or line.upper().startswith("SET AUTOCOMMIT"):
                         self._execute_sql(line.upper() + ";")
@@ -124,7 +138,25 @@ class HybridDatabaseCLI:
         
         try:
             start_time = time.time()
-            result = self.adapter.execute(sql)
+            # 根据模式路由
+            if self.mode == "adapter":
+                result = self.adapter.execute(sql)
+            else:
+                # CORE 模式下：直接走核心混合引擎（简单SQL，支持 * 与更宽松 WHERE）
+                # 仅传递纯 SQL；事务/索引/EXPLAIN 等命令在 CORE 模式下不支持
+                up = sql.strip().upper().rstrip(';')
+                unsupported = (
+                    up in ("BEGIN", "COMMIT", "ROLLBACK", "SHOW TRANSACTION") or
+                    up.startswith("SET AUTOCOMMIT") or
+                    up.startswith("CREATE INDEX") or up.startswith("DROP INDEX") or
+                    up.startswith("CREATE COMPOSITE INDEX") or up.startswith("DROP COMPOSITE INDEX") or
+                    up == "SHOW INDEXES" or up == "SHOW COMPOSITE INDEXES" or
+                    up.startswith("EXPLAIN ")
+                )
+                if unsupported:
+                    result = {"status": "error", "error": "该命令在 CORE 模式暂不支持，请切换 MODE ADAPTER", "affected_rows": 0, "data": []}
+                else:
+                    result = self.core_engine.execute(sql)
             execution_time = time.time() - start_time
             
             self._display_result(result, execution_time)
@@ -138,6 +170,26 @@ class HybridDatabaseCLI:
             print(f" 未知错误: {str(e)}")
         
         print("-" * 60)
+
+    def _switch_mode(self, line: str):
+        """切换执行后端模式"""
+        try:
+            parts = line.strip().split()
+            if len(parts) != 2:
+                print(" 用法: MODE ADAPTER|CORE")
+                return
+            target = parts[1].lower()
+            if target not in ("adapter", "core"):
+                print(" 模式必须是 ADAPTER 或 CORE")
+                return
+            self.mode = target
+            print(f"✓ 已切换到模式: {self.mode}")
+            if self.mode == "adapter":
+                print("  - 使用 SQL 编译器 + C++ 执行引擎，支持事务/索引/EXPLAIN 等增强命令")
+            else:
+                print("  - 使用核心混合引擎，支持更宽松 SQL 解析（含 *、更复杂 WHERE）")
+        except Exception as e:
+            print(f" 切换模式失败: {str(e)}")
 
     def _display_result(self, result: Dict[str, Any], execution_time: float):
         """显示查询结果"""
@@ -216,10 +268,12 @@ class HybridDatabaseCLI:
   cache      - 显示缓存统计
   flushcache - 刷新缓存并刷盘
   SHOW TRANSACTION         - 查看事务状态与缓冲
+  SHOW OVERLAY             - 查看事务覆盖层 (MVCC/UNDO)
   SET AUTOCOMMIT = ON|OFF  - 开关自动提交
   BEGIN      - 开启事务
   COMMIT     - 提交事务
   ROLLBACK   - 回滚事务
+  MODE ADAPTER|CORE        - 切换执行后端 (ADAPTER 支持事务/索引/EXPLAIN 与版本链; CORE 为核心引擎快速路径)
   CREATE INDEX idx ON table(col) PK pkcol;  - 创建二级索引
   DROP INDEX table(col);                     - 删除索引
   SHOW INDEXES                               - 查看所有索引
@@ -244,6 +298,22 @@ class HybridDatabaseCLI:
   SHOW INDEXES;                                          - 查看所有索引
   SHOW COMPOSITE INDEXES;                                - 查看复合索引
   EXPLAIN <SQL>;                                         - 显示执行路径与估计
+
+🧵 版本链/MVCC 提示（仅 ADAPTER 模式生效）:
+  - 使用 BEGIN 开启事务后，INSERT/DELETE/UPDATE 会写入版本链；当前事务可见，其他事务不可见。
+  - COMMIT 后版本对其他会话可见；ROLLBACK 将丢弃未提交版本。
+  - SHOW OVERLAY 可查看当前事务覆盖层（新增/删除计数）。
+
+🔀 模式说明:
+  - ADAPTER: 走 SQL 编译器 + 执行器，支持事务/索引/EXPLAIN，启用版本链可见性控制。
+  - CORE:    走核心混合引擎，SQL 更宽松（允许 * 与更复杂 WHERE），但不支持事务/索引/EXPLAIN/版本链。
+
+💡 快速示例（MVCC）:
+  MODE ADAPTER
+  BEGIN;
+  INSERT INTO t (id, name) VALUES (5, 'E');
+  SELECT id, name FROM t WHERE id = 5;  -- 本事务可见
+  ROLLBACK;  -- 其它会话始终不可见
 
 📊 支持的数据类型:
   INT     - 整数
@@ -367,6 +437,25 @@ class HybridDatabaseCLI:
             print("✓ 缓存已刷新并刷盘")
         except Exception as e:
             print(f" 刷新缓存失败: {str(e)}")
+
+    def _show_tx_overlay(self):
+        """显示事务覆盖层信息"""
+        try:
+            # 通过 UnifiedDB 访问 runner 暴露的 overlay 快照
+            from src.api.unified_api import UnifiedDB
+            if not hasattr(self, "_unified"):
+                self._unified = UnifiedDB()
+            snap = self._unified.show_tx_overlay()
+            print("事务覆盖层:")
+            print(f"  in_tx: {snap.get('in_tx')}")
+            tables = snap.get("tables", {}) or {}
+            if not tables:
+                print("  (empty)")
+            else:
+                for t, s in tables.items():
+                    print(f"  - {t}: inserts={s.get('inserts',0)}, deletes={s.get('deletes',0)}")
+        except Exception as e:
+            print(f" 显示覆盖层失败: {str(e)}")
 
 
 def main():

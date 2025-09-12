@@ -1,0 +1,75 @@
+{"txid": "443c7d94-ee5e-4309-b642-b2cfa0fd1b74", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "443c7d94-ee5e-4309-b642-b2cfa0fd1b74", "op": "INSERT", "table": "t", "payload": {"values": ["1", "Alice", "20"]}}
+{"txid": "443c7d94-ee5e-4309-b642-b2cfa0fd1b74", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "5a5c5c1d-a746-49ab-a60d-ba4b2f5a7d78", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "5a5c5c1d-a746-49ab-a60d-ba4b2f5a7d78", "op": "INSERT", "table": "t", "payload": {"values": ["2", "Bob", "21"]}}
+{"txid": "5a5c5c1d-a746-49ab-a60d-ba4b2f5a7d78", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "864a5e28-288e-41cc-b887-2277a6710ab0", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "864a5e28-288e-41cc-b887-2277a6710ab0", "op": "INSERT", "table": "t", "payload": {"values": ["3", "Carol", "20"]}}
+{"txid": "864a5e28-288e-41cc-b887-2277a6710ab0", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "63fd6241-1bfd-47fd-a5eb-2061c79e66d7", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "63fd6241-1bfd-47fd-a5eb-2061c79e66d7", "op": "INSERT", "table": "t", "payload": {"values": ["4", "Dave", "25"]}}
+{"txid": "63fd6241-1bfd-47fd-a5eb-2061c79e66d7", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "53f6c654-55ad-4896-9d96-5b411789ec86", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "53f6c654-55ad-4896-9d96-5b411789ec86", "op": "INSERT", "table": "t_opt", "payload": {"values": ["1", "Alice", "20"]}}
+{"txid": "53f6c654-55ad-4896-9d96-5b411789ec86", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "78f3ca10-4986-48a5-84f2-239821fbf508", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "78f3ca10-4986-48a5-84f2-239821fbf508", "op": "INSERT", "table": "t_opt", "payload": {"values": ["2", "Bob", "21"]}}
+{"txid": "78f3ca10-4986-48a5-84f2-239821fbf508", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "70fcec29-f9b2-4b25-917f-dd105e95cf9b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "70fcec29-f9b2-4b25-917f-dd105e95cf9b", "op": "INSERT", "table": "t_opt", "payload": {"values": ["3", "Carol", "20"]}}
+{"txid": "70fcec29-f9b2-4b25-917f-dd105e95cf9b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c08d1400-6445-4406-b5eb-8494f415f63b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c08d1400-6445-4406-b5eb-8494f415f63b", "op": "INSERT", "table": "t_opt", "payload": {"values": ["5", "Eva", "30"]}}
+{"txid": "c08d1400-6445-4406-b5eb-8494f415f63b", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "1a5d61fd-765c-4765-a110-66744404a60b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1a5d61fd-765c-4765-a110-66744404a60b", "op": "INSERT", "table": "t_opt", "payload": {"values": ["6", "Frank", "30"]}}
+{"txid": "1a5d61fd-765c-4765-a110-66744404a60b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "5ea718f0-8d29-4ddd-9c4b-d487a93647ac", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "5ea718f0-8d29-4ddd-9c4b-d487a93647ac", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["1", "A"]}}
+{"txid": "5ea718f0-8d29-4ddd-9c4b-d487a93647ac", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "16e53830-774b-436c-99f0-1cbe5744f1fd", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "16e53830-774b-436c-99f0-1cbe5744f1fd", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["2", "B"]}}
+{"txid": "16e53830-774b-436c-99f0-1cbe5744f1fd", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "0cfb235f-648b-48fc-b038-1b864864030f", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "0cfb235f-648b-48fc-b038-1b864864030f", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["5", "E"]}}
+{"txid": "0cfb235f-648b-48fc-b038-1b864864030f", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "1472cb69-cbe0-4a56-b593-17a8f0c392e2", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1472cb69-cbe0-4a56-b593-17a8f0c392e2", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["6", "F"]}}
+{"txid": "1472cb69-cbe0-4a56-b593-17a8f0c392e2", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "2a9c2f2b-d196-4903-b06b-e55bc0a6c35c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "2a9c2f2b-d196-4903-b06b-e55bc0a6c35c", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "b48abb83-6b94-4e9b-b502-b94c76fabf2b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b48abb83-6b94-4e9b-b502-b94c76fabf2b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "51de4144-b69b-4961-ad73-b9b9b610dfd1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "51de4144-b69b-4961-ad73-b9b9b610dfd1", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["1", "A"]}}
+{"txid": "51de4144-b69b-4961-ad73-b9b9b610dfd1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ef5eae73-1602-452c-9448-c3e6920259f1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ef5eae73-1602-452c-9448-c3e6920259f1", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["2", "B"]}}
+{"txid": "ef5eae73-1602-452c-9448-c3e6920259f1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "8c8dcd78-7cc9-4dbf-aa99-cd57ca8b2f5d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "8c8dcd78-7cc9-4dbf-aa99-cd57ca8b2f5d", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["5", "E"]}}
+{"txid": "8c8dcd78-7cc9-4dbf-aa99-cd57ca8b2f5d", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "6061d926-1afc-4f4a-ad7e-6d7b5bfc3543", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "6061d926-1afc-4f4a-ad7e-6d7b5bfc3543", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["6", "F"]}}
+{"txid": "6061d926-1afc-4f4a-ad7e-6d7b5bfc3543", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "50c8799a-bf26-4a40-8685-bef5854e34f1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "50c8799a-bf26-4a40-8685-bef5854e34f1", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "85406d25-5334-42c4-9bf0-f6fee265fb5d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "85406d25-5334-42c4-9bf0-f6fee265fb5d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "3f69105f-adb5-4d5e-af57-693c281e6823", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "3f69105f-adb5-4d5e-af57-693c281e6823", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["1", "A"]}}
+{"txid": "3f69105f-adb5-4d5e-af57-693c281e6823", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c6c6f05b-6408-4e38-b15b-89c3270ee5f4", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c6c6f05b-6408-4e38-b15b-89c3270ee5f4", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["2", "B"]}}
+{"txid": "c6c6f05b-6408-4e38-b15b-89c3270ee5f4", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "86b9c1d9-c2ad-4592-9263-d99b000745c4", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "86b9c1d9-c2ad-4592-9263-d99b000745c4", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["5", "E"]}}
+{"txid": "86b9c1d9-c2ad-4592-9263-d99b000745c4", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "6dcaa644-d92e-444f-95a9-be72a47c713e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "6dcaa644-d92e-444f-95a9-be72a47c713e", "op": "INSERT", "table": "mvcc_t", "payload": {"values": ["6", "F"]}}
+{"txid": "6dcaa644-d92e-444f-95a9-be72a47c713e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "0ea3a3b4-d74a-4893-b7ac-4a2cbe9d4c9e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "0ea3a3b4-d74a-4893-b7ac-4a2cbe9d4c9e", "op": "ABORT", "table": null, "payload": {}}
+{"txid": "9ab905f3-4a2d-4f9a-81bc-0f0a84d915b8", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9ab905f3-4a2d-4f9a-81bc-0f0a84d915b8", "op": "COMMIT", "table": null, "payload": {}}
