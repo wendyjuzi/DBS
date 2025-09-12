@@ -66,6 +66,10 @@ class Planner:
                 plan = self.plan_delete(ast)
             elif stmt_type == "DROP_TABLE":
                 plan = self.plan_drop(ast)
+            elif stmt_type in ["BEGIN_TRANSACTION", "COMMIT", "ROLLBACK"]:
+                plan = self.plan_transaction(ast)
+            elif stmt_type in ["CREATE_INDEX", "DROP_INDEX"]:
+                plan = self.plan_index(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             
@@ -155,6 +159,42 @@ class Planner:
 
     def plan_drop(self, ast):
         return LogicalPlan("DropTable", table=ast["table"])
+
+    def plan_transaction(self, ast):
+        """生成事务控制语句的执行计划"""
+        stmt_type = ast["type"]
+        
+        if stmt_type == "BEGIN_TRANSACTION":
+            return LogicalPlan("BeginTransaction")
+        elif stmt_type == "COMMIT":
+            return LogicalPlan("Commit")
+        elif stmt_type == "ROLLBACK":
+            return LogicalPlan("Rollback")
+        else:
+            raise PlanError(f"未知的事务语句类型: {stmt_type}")
+    
+    def plan_index(self, ast):
+        """生成索引操作的执行计划"""
+        stmt_type = ast["type"]
+        
+        if stmt_type == "CREATE_INDEX":
+            return LogicalPlan(
+                "CreateIndex",
+                index_name=ast.get("index_name", ""),
+                table_name=ast.get("table_name", ""),
+                columns=ast.get("columns", []),
+                index_type=ast.get("index_type", "BTREE"),
+                is_unique=ast.get("is_unique", False),
+                where_condition=ast.get("where_condition")
+            )
+        elif stmt_type == "DROP_INDEX":
+            return LogicalPlan(
+                "DropIndex",
+                index_name=ast.get("index_name", ""),
+                table_name=ast.get("table_name")
+            )
+        else:
+            raise PlanError(f"未知的索引语句类型: {stmt_type}")
 
 
 if __name__ == "__main__":

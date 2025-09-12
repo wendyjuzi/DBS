@@ -217,21 +217,51 @@ class Parser:
 
     def statement(self):
         if self.current_token.lexeme.upper() == "CREATE":
-            return self.create_table()
+            # 检查是 CREATE TABLE 还是 CREATE INDEX
+            next_token_idx = self.pos + 1
+            if next_token_idx < len(self.tokens):
+                next_token = self.tokens[next_token_idx]
+                if next_token.lexeme.upper() == "INDEX":
+                    return self.create_index()
+                elif next_token.lexeme.upper() in ["UNIQUE"]:
+                    # 检查 CREATE UNIQUE INDEX
+                    unique_next_idx = self.pos + 2
+                    if unique_next_idx < len(self.tokens):
+                        unique_next_token = self.tokens[unique_next_idx]
+                        if unique_next_token.lexeme.upper() == "INDEX":
+                            return self.create_index()
+                    return self.create_table()
+                else:
+                    return self.create_table()
+            else:
+                return self.create_table()
         elif self.current_token.lexeme.upper() == "INSERT":
             return self.insert()
         elif self.current_token.lexeme.upper() == "SELECT":
             return self.select()
-        elif self.current_token.lexeme.upper() == "DELETE":
-            return self.delete()
         elif self.current_token.lexeme.upper() == "UPDATE":
             return self.update()
+        elif self.current_token.lexeme.upper() == "DELETE":
+            return self.delete()
         elif self.current_token.lexeme.upper() == "DROP":
-            return self.drop_table()
+            # 检查是 DROP TABLE 还是 DROP INDEX
+            next_token_idx = self.pos + 1
+            if next_token_idx < len(self.tokens):
+                next_token = self.tokens[next_token_idx]
+                if next_token.lexeme.upper() == "INDEX":
+                    return self.drop_index()
+                else:
+                    return self.drop_table()
+            else:
+                return self.drop_table()
+        elif self.current_token.lexeme.upper() == "BEGIN":
+            return self.begin_transaction()
+        elif self.current_token.lexeme.upper() == "COMMIT":
+            return self.commit()
+        elif self.current_token.lexeme.upper() == "ROLLBACK":
+            return self.rollback()
         else:
-            # 提供上下文信息给智能诊断
-            context = f"statement_start:{self.current_token.lexeme}"
-            raise ParseError(f"Unknown statement '{self.current_token.lexeme}'", self.current_token, context)
+            raise ParseError(f"Unsupported statement beginning with '{self.current_token.lexeme}'", self.current_token)
 
     def create_table(self):
         self.expect("KEYWORD", "CREATE")
@@ -746,6 +776,114 @@ class Parser:
         table_name = self.expect("IDENTIFIER").lexeme
         self.expect("DELIMITER", ";")
         return ASTNode("DROP_TABLE", table_name)
+
+    def begin_transaction(self):
+        """解析 BEGIN TRANSACTION 语句"""
+        self.expect("KEYWORD", "BEGIN")
+        # TRANSACTION 或 WORK 是可选的
+        if self.current_token and self.current_token.lexeme.upper() in ["TRANSACTION", "WORK"]:
+            self.advance()
+        self.expect("DELIMITER", ";")
+        return ASTNode("BEGIN_TRANSACTION")
+
+    def commit(self):
+        """解析 COMMIT 语句"""
+        self.expect("KEYWORD", "COMMIT")
+        # WORK 是可选的
+        if self.current_token and self.current_token.lexeme.upper() == "WORK":
+            self.advance()
+        self.expect("DELIMITER", ";")
+        return ASTNode("COMMIT")
+
+    def rollback(self):
+        """解析 ROLLBACK 语句"""
+        self.expect("KEYWORD", "ROLLBACK")
+        # WORK 是可选的
+        if self.current_token and self.current_token.lexeme.upper() == "WORK":
+            self.advance()
+        self.expect("DELIMITER", ";")
+        return ASTNode("ROLLBACK")
+
+    def create_index(self):
+        """解析 CREATE INDEX 语句"""
+        self.expect("KEYWORD", "CREATE")
+        
+        # 检查是否是 UNIQUE INDEX
+        is_unique = False
+        if self.current_token and self.current_token.lexeme.upper() == "UNIQUE":
+            is_unique = True
+            self.advance()
+        
+        self.expect("KEYWORD", "INDEX")
+        index_name = self.expect("IDENTIFIER").lexeme
+        
+        self.expect("KEYWORD", "ON")
+        table_name = self.expect("IDENTIFIER").lexeme
+        
+        # 解析列列表
+        self.expect("DELIMITER", "(")
+        columns = []
+        while True:
+            col_name = self.expect("IDENTIFIER").lexeme
+            columns.append(col_name)
+            if self.current_token and self.current_token.lexeme == ",":
+                self.advance()
+            else:
+                break
+        self.expect("DELIMITER", ")")
+        
+        # 可选的 USING 子句（指定索引类型）
+        index_type = "BTREE"  # 默认为B+树
+        if self.current_token and self.current_token.lexeme.upper() == "USING":
+            self.advance()
+            # 期望索引类型
+            if self.current_token and self.current_token.lexeme.upper() in ["BTREE", "HASH"]:
+                index_type = self.current_token.lexeme.upper()
+                self.advance()
+            else:
+                # 不支持的索引类型，抛出带有上下文的错误
+                context = f"create_index_using_type:{self.current_token.lexeme if self.current_token else 'EOF'}"
+                raise ParseError(f"不支持的索引类型 '{self.current_token.lexeme}', 只支持 BTREE 和 HASH", 
+                               self.current_token, context)
+        
+        # 可选的 WHERE 子句（部分索引）
+        where_condition = None
+        if self.current_token and self.current_token.lexeme.upper() == "WHERE":
+            where_condition = self.parse_where()
+        
+        self.expect("DELIMITER", ";")
+        
+        # 构建 AST 节点
+        index_node = ASTNode("CREATE_INDEX", index_name)
+        index_node.children.append(ASTNode("TABLE", table_name))
+        index_node.children.append(ASTNode("COLUMNS", ",".join(columns)))
+        index_node.children.append(ASTNode("TYPE", index_type))
+        if is_unique:
+            index_node.children.append(ASTNode("UNIQUE", "TRUE"))
+        if where_condition:
+            index_node.children.append(where_condition)
+        
+        return index_node
+    
+    def drop_index(self):
+        """解析 DROP INDEX 语句"""
+        self.expect("KEYWORD", "DROP")
+        self.expect("KEYWORD", "INDEX")
+        index_name = self.expect("IDENTIFIER").lexeme
+        
+        # 可选的 ON table_name
+        table_name = None
+        if self.current_token and self.current_token.lexeme.upper() == "ON":
+            self.advance()
+            table_name = self.expect("IDENTIFIER").lexeme
+        
+        self.expect("DELIMITER", ";")
+        
+        drop_node = ASTNode("DROP_INDEX", index_name)
+        if table_name:
+            drop_node.children.append(ASTNode("TABLE", table_name))
+        
+        return drop_node
 
 # 测试
 if __name__ == "__main__":
