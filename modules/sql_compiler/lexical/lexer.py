@@ -124,8 +124,15 @@ class Lexer:
         if char in "=<>":
             if self.peek() == '=':
                 char += self.advance()
+            elif char == '<' and self.peek() == '>':
+                char += self.advance()  # 支持 <> (不等于)
+            elif char == '!' and self.peek() == '=':
+                char += self.advance()  # 支持 != (不等于)
             self.add_token("OPERATOR", char, self.line, start_col)
         elif char in "+-*/%":
+            self.add_token("OPERATOR", char, self.line, start_col)
+        elif char == '!' and self.peek() == '=':
+            char += self.advance()  # 处理 != 操作符
             self.add_token("OPERATOR", char, self.line, start_col)
         elif char in "(),;.*":
             self.add_token("DELIMITER", char, self.line, start_col)

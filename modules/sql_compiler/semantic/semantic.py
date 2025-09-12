@@ -7,6 +7,17 @@ try:
 except ImportError:
     DIAGNOSTICS_AVAILABLE = False
 
+# 导入 ASTNode 类
+try:
+    from modules.sql_compiler.syntax.parser import ASTNode
+except ImportError:
+    # 如果无法导入，创建一个简单的替代类
+    class ASTNode:
+        def __init__(self, node_type, value=None, children=None):
+            self.node_type = node_type
+            self.value = value
+            self.children = children or []
+
 class SemanticError(Exception):
     def __init__(self, error_type, position, message, available_tables=None, available_columns=None):
         self.error_type = error_type
@@ -394,12 +405,30 @@ class SemanticAnalyzer:
                 # 跳过 * 通配符的检查，它表示选择所有列
                 if child.value == "*":
                     continue
-                if not self._column_exists_in_tables_with_aliases(tables, child.value, table_aliases):
+
+                # 处理带别名的列
+                if isinstance(child.value, str) and " AS " in child.value.upper():
+                    # "AS" keyword is case-insensitive
+                    col_part = child.value.upper().split(" AS ")[0].strip()
+                    if not self._column_exists_in_tables_with_aliases(tables, col_part, table_aliases):
+                        raise SemanticError(
+                            "ColumnError", col_part, "列不存在于任何表中",
+                            available_tables=self._get_available_tables(),
+                            available_columns=self._get_available_columns()
+                        )
+                    continue
+
+                # 普通列名检查
+                col_name = str(child.value)
+                if col_name != "*" and not self._column_exists_in_tables_with_aliases(tables, col_name, table_aliases):
                     raise SemanticError(
-                        "ColumnError", child.value, "列不存在于任何表中",
+                        "ColumnError", col_name, "列不存在于任何表中",
                         available_tables=self._get_available_tables(),
                         available_columns=self._get_available_columns()
                     )
+            elif child.node_type == "AGGREGATE":
+                # 直接检查聚合函数节点
+                self._check_aggregate_function(child, tables, table_aliases)
 
         # 检查 WHERE 子句
         where_node = next((child for child in ast.children if child.node_type == "WHERE"), None)
@@ -565,33 +594,120 @@ class SemanticAnalyzer:
             )
 
     def _check_where_multi_table(self, tables, where_node, table_aliases=None):
-        """检查多表环境下的 WHERE 条件"""
+        """检查多表环境下的 WHERE 条件（支持复杂条件）"""
         if table_aliases is None:
             table_aliases = {}
+        
+        # 递归检查WHERE条件树
+        for child in where_node.children:
+            self._check_condition_node(child, tables, table_aliases)
+    
+    def _check_condition_node(self, node, tables, table_aliases):
+        """递归检查条件节点"""
+        if node.node_type == "LOGICAL_OP":
+            # 递归检查逻辑操作符的子节点
+            for child in node.children:
+                self._check_condition_node(child, tables, table_aliases)
+                
+        elif node.node_type == "COMPARISON":
+            # 检查比较操作
+            left = next((c for c in node.children if c.node_type == "LEFT"), None)
+            right = next((c for c in node.children if c.node_type == "RIGHT"), None)
             
-        left = next((c for c in where_node.children if c.node_type == "LEFT"), None)
-        right = next((c for c in where_node.children if c.node_type == "RIGHT"), None)
+            if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
+                raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
+                
+            # 检查右侧如果是列名
+            if right and not str(right.value).replace(".", "").isdigit():
+                # 如果不是数字，检查是否是列名
+                if "." in str(right.value) or any(table for table in tables if right.value in self.catalog.tables.get(table, {})):
+                    if not self._column_exists_in_tables_with_aliases(tables, right.value, table_aliases):
+                        # 如果看起来像列名但不存在，可能是字符串常量，允许通过
+                        pass
+                        
+        elif node.node_type == "BETWEEN":
+            # 检查 BETWEEN 操作
+            left = next((c for c in node.children if c.node_type == "LEFT"), None)
+            if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
+                raise SemanticError("ColumnError", left.value, "BETWEEN 子句中的列不存在")
+                
+        elif node.node_type == "IN":
+            # 检查 IN 操作
+            left = next((c for c in node.children if c.node_type == "LEFT"), None)
+            if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
+                raise SemanticError("ColumnError", left.value, "IN 子句中的列不存在")
+                
+        elif node.node_type == "LIKE":
+            # 检查 LIKE 操作
+            left = next((c for c in node.children if c.node_type == "LEFT"), None)
+            if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
+                raise SemanticError("ColumnError", left.value, "LIKE 子句中的列不存在")
         
-        if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
-            raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
-        
-        # right 通常是常量，不需要检查表中是否存在
-        # 但如果 right 也是列名，则需要检查
-        if right and right.value:
-            right_value = str(right.value)
-            # 如果是数字，不需要检查
-            if right_value.replace(".", "").isdigit():
-                pass  # 数字常量，跳过检查
-            # 如果是字符串常量（词法分析器已经去掉了引号），不需要检查
-            # 这里我们假设非数字的CONST都是字符串常量
+        # 兼容旧格式的WHERE节点 (LEFT, OP, RIGHT)
+        elif hasattr(node, 'children'):
+            left = next((c for c in node.children if c.node_type == "LEFT"), None)
+            right = next((c for c in node.children if c.node_type == "RIGHT"), None)
+            
+            if left and hasattr(left, 'value'):
+                if not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
+                    raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
+
+    def _check_aggregate_function(self, func_node, tables, table_aliases):
+        """检查聚合函数的语义正确性"""
+        try:
+            func_name = func_node.value
+            arg_node = next((c for c in func_node.children if c.node_type == "ARG"), None)
+            
+            if not arg_node:
+                raise SemanticError("AggregateError", func_name, f"聚合函数 {func_name} 缺少参数")
+            
+            arg_value = arg_node.value
+            
+            # COUNT(*) 是特殊情况，无需检查列存在性
+            if func_name == "COUNT" and arg_value == "*":
+                print(f"[OK] 聚合函数 {func_name}(*) 语义检查通过")
+                return
+            
+            # 处理 DISTINCT 修饰符
+            if isinstance(arg_value, str) and arg_value.startswith("DISTINCT "):
+                actual_column = arg_value[9:]  # 去掉 "DISTINCT " 前缀
             else:
-                # 检查是否真的是列名
-                if self._column_exists_in_tables_with_aliases(tables, right.value, table_aliases):
-                    # 如果确实是列名，则允许
-                    pass
-                else:
-                    # 如果不是列名，则认为是字符串常量，跳过检查
-                    pass
+                actual_column = arg_value
+            
+            # 检查列是否存在（仅对非*参数）
+            if actual_column != "*":
+                if not self._column_exists_in_tables_with_aliases(tables, actual_column, table_aliases):
+                    raise SemanticError(
+                        "ColumnError", actual_column, f"聚合函数 {func_name} 中的列不存在",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
+                
+                # 检查数据类型兼容性
+                if func_name in ["SUM", "AVG"]:
+                    # SUM 和 AVG 只能用于数值列
+                    for table in tables:
+                        if self.catalog.has_column(table, actual_column):
+                            col_type = self.catalog.get_column_type(table, actual_column)
+                            if col_type not in ["INT", "DOUBLE", "FLOAT"]:
+                                raise SemanticError(
+                                    "TypeError", actual_column, 
+                                    f"聚合函数 {func_name} 不能用于非数值类型列 ({col_type})",
+                                    available_tables=self._get_available_tables(),
+                                    available_columns=self._get_available_columns()
+                                )
+                            break
+            
+            print(f"[OK] 聚合函数 {func_name}({arg_value}) 语义检查通过")
+            
+        except Exception as e:
+            # 如果检查过程中出现任何错误，提供更详细的错误信息
+            print(f"[DEBUG] 聚合函数检查出错: {e}")
+            print(f"[DEBUG] func_node类型: {type(func_node)}")
+            print(f"[DEBUG] func_node内容: {func_node}")
+            if hasattr(func_node, 'children'):
+                print(f"[DEBUG] func_node.children: {func_node.children}")
+            raise e
 
     def _check_drop(self, ast):
         """检查 DROP TABLE 语句"""

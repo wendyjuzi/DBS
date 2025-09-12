@@ -3,7 +3,15 @@ KEYWORDS = {
     "SELECT", "FROM", "WHERE", "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "DELETE",
     "UPDATE", "SET", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "ON", 
     "ORDER", "BY", "GROUP", "ASC", "DESC", "HAVING", "PRIMARY", "KEY", "FOREIGN",
-    "REFERENCES", "CONSTRAINT", "NOT", "NULL", "UNIQUE", "DROP"
+    "REFERENCES", "CONSTRAINT", "NOT", "NULL", "UNIQUE", "DROP",
+    # 逻辑操作符
+    "AND", "OR", "NOT",
+    # 范围查询
+    "BETWEEN", "IN", "LIKE",
+    # 聚合函数
+    "COUNT", "SUM", "AVG", "MAX", "MIN",
+    # 其他
+    "DISTINCT", "ALL", "AS"
 }
 
 class Column:

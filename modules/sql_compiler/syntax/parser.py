@@ -368,14 +368,25 @@ class Parser:
     def select(self):
         self.expect("KEYWORD", "SELECT")
         
-        # 解析列名（支持 * 通配符）
+        # 解析列名（支持 * 通配符和聚合函数）
         columns = []
         while True:
             if self.current_token and self.current_token.type == "OPERATOR" and self.current_token.lexeme == "*":
                 columns.append("*")
                 self.advance()
+            elif self.current_token and self.current_token.lexeme.upper() in ["COUNT", "SUM", "AVG", "MAX", "MIN"]:
+                # 解析聚合函数
+                func_node = self.parse_aggregate_function()
+                columns.append(func_node)
             else:
-                columns.append(self.parse_qualified_identifier())
+                col_expr = self.parse_qualified_identifier()
+                # 检查是否有别名 (AS alias)
+                if self.current_token and self.current_token.lexeme.upper() == "AS":
+                    self.advance()  # 跳过 AS
+                    alias = self.expect("IDENTIFIER").lexeme
+                    columns.append(f"{col_expr} AS {alias}")
+                else:
+                    columns.append(col_expr)
             
             if self.current_token and self.current_token.lexeme == ",":
                 self.advance()
@@ -405,7 +416,14 @@ class Parser:
         self.expect("DELIMITER", ";")
         
         # 构建 AST
-        children = [ASTNode("COLUMN", c) for c in columns]
+        children = []
+        for c in columns:
+            # hasattr is safer than isinstance due to potential circular imports
+            if hasattr(c, 'node_type') and c.node_type == 'AGGREGATE':
+                children.append(c)
+            else:
+                children.append(ASTNode("COLUMN", c))
+
         children.append(from_clause)
         if where_node:
             children.append(where_node)
@@ -579,12 +597,147 @@ class Parser:
             return identifier
 
     def parse_where(self):
-        """解析 WHERE 子句，返回 WHERE 节点"""
+        """解析 WHERE 子句，支持复杂条件表达式"""
         self.advance()  # 跳过 WHERE
+        condition = self.parse_or_expression()
+        return ASTNode("WHERE", None, [condition])
+    
+    def parse_or_expression(self):
+        """解析 OR 表达式 (最低优先级)"""
+        left = self.parse_and_expression()
+        
+        while self.current_token and self.current_token.lexeme.upper() == "OR":
+            self.advance()  # 跳过 OR
+            right = self.parse_and_expression()
+            left = ASTNode("LOGICAL_OP", "OR", [left, right])
+        
+        return left
+    
+    def parse_and_expression(self):
+        """解析 AND 表达式"""
+        left = self.parse_not_expression()
+        
+        while self.current_token and self.current_token.lexeme.upper() == "AND":
+            self.advance()  # 跳过 AND
+            right = self.parse_not_expression()
+            left = ASTNode("LOGICAL_OP", "AND", [left, right])
+        
+        return left
+    
+    def parse_not_expression(self):
+        """解析 NOT 表达式"""
+        if self.current_token and self.current_token.lexeme.upper() == "NOT":
+            self.advance()  # 跳过 NOT
+            expr = self.parse_comparison_expression()
+            return ASTNode("LOGICAL_OP", "NOT", [expr])
+        else:
+            return self.parse_comparison_expression()
+    
+    def parse_comparison_expression(self):
+        """解析比较表达式"""
+        if self.current_token and self.current_token.lexeme == "(":
+            # 处理括号表达式
+            self.advance()  # 跳过 (
+            expr = self.parse_or_expression()
+            self.expect("DELIMITER", ")")
+            return expr
+        
+        # 解析左操作数
         left = self.parse_qualified_identifier()
+        
+        # 检查操作符类型
+        if not self.current_token:
+            raise ParseError("Expected operator after identifier")
+            
+        if self.current_token.lexeme.upper() == "BETWEEN":
+            return self.parse_between_expression(left)
+        elif self.current_token.lexeme.upper() == "IN":
+            return self.parse_in_expression(left)
+        elif self.current_token.lexeme.upper() == "LIKE":
+            return self.parse_like_expression(left)
+        elif self.current_token.type == "OPERATOR":
+            return self.parse_simple_comparison(left)
+        else:
+            raise ParseError(f"Unexpected token in WHERE clause: {self.current_token.lexeme}")
+    
+    def parse_simple_comparison(self, left):
+        """解析简单比较操作 (=, >, <, >=, <=, !=, <>)"""
         op = self.expect("OPERATOR").lexeme
-        right = self.expect("CONST").lexeme
-        return ASTNode("WHERE", None, [ASTNode("LEFT", left), ASTNode("OP", op), ASTNode("RIGHT", right)])
+        right = self.parse_value_or_identifier()
+        return ASTNode("COMPARISON", op, [ASTNode("LEFT", left), ASTNode("RIGHT", right)])
+    
+    def parse_between_expression(self, left):
+        """解析 BETWEEN 表达式"""
+        self.advance()  # 跳过 BETWEEN
+        start_val = self.parse_value_or_identifier()
+        self.expect("KEYWORD", "AND")
+        end_val = self.parse_value_or_identifier()
+        return ASTNode("BETWEEN", None, [
+            ASTNode("LEFT", left), 
+            ASTNode("START", start_val), 
+            ASTNode("END", end_val)
+        ])
+    
+    def parse_in_expression(self, left):
+        """解析 IN 表达式"""
+        self.advance()  # 跳过 IN
+        self.expect("DELIMITER", "(")
+        values = []
+        while True:
+            val = self.parse_value_or_identifier()
+            values.append(ASTNode("VALUE", val))
+            if self.current_token and self.current_token.lexeme == ",":
+                self.advance()
+            else:
+                break
+        self.expect("DELIMITER", ")")
+        return ASTNode("IN", None, [ASTNode("LEFT", left)] + values)
+    
+    def parse_like_expression(self, left):
+        """解析 LIKE 表达式"""
+        self.advance()  # 跳过 LIKE
+        pattern = self.parse_value_or_identifier()
+        return ASTNode("LIKE", None, [ASTNode("LEFT", left), ASTNode("PATTERN", pattern)])
+    
+    def parse_value_or_identifier(self):
+        """解析值或标识符"""
+        if self.current_token.type == "CONST":
+            val = self.current_token.lexeme
+            self.advance()
+            return val
+        elif self.current_token.type == "IDENTIFIER":
+            return self.parse_qualified_identifier()
+        else:
+            raise ParseError(f"Expected value or identifier, got {self.current_token.type}")
+    
+    def parse_aggregate_function(self):
+        """解析聚合函数 (COUNT, SUM, AVG, MAX, MIN)"""
+        func_name = self.current_token.lexeme.upper()
+        self.advance()  # 跳过函数名
+        
+        self.expect("DELIMITER", "(")
+        
+        # 处理参数
+        if func_name == "COUNT":
+            if self.current_token and self.current_token.lexeme == "*":
+                arg = "*"
+                self.advance()
+            elif self.current_token and self.current_token.lexeme.upper() == "DISTINCT":
+                self.advance()  # 跳过 DISTINCT
+                arg = f"DISTINCT {self.parse_qualified_identifier()}"
+            else:
+                arg = self.parse_qualified_identifier()
+        else:
+            # SUM, AVG, MAX, MIN 只接受列名
+            if self.current_token and self.current_token.lexeme.upper() == "DISTINCT":
+                self.advance()  # 跳过 DISTINCT
+                arg = f"DISTINCT {self.parse_qualified_identifier()}"
+            else:
+                arg = self.parse_qualified_identifier()
+        
+        self.expect("DELIMITER", ")")
+        
+        return ASTNode("AGGREGATE", func_name, [ASTNode("ARG", arg)])
 
     def drop_table(self):
         """解析 DROP TABLE 语句"""
