@@ -186,6 +186,8 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
         self.current_token = self.tokens[self.pos] if self.tokens else None
+        self.in_trigger_context = False  # 标记是否在触发器上下文中
+        self.current_delimiter = ";"  # 当前语句分隔符，默认为分号
 
     def advance(self):
         self.pos += 1
@@ -206,14 +208,76 @@ class Parser:
         token = self.current_token
         self.advance()
         return token
+    
+    def expect_delimiter(self, context=""):
+        """期望当前分隔符（支持多字符分隔符）"""
+        if not self.current_token:
+            raise ParseError(f"Unexpected end of input, expected delimiter '{self.current_delimiter}'", None, context)
+        
+        # 如果分隔符为空，则不期望任何分隔符
+        if not self.current_delimiter:
+            return None
+        
+        # 对于多字符分隔符，需要逐个检查字符
+        if len(self.current_delimiter) == 1:
+            # 单字符分隔符
+            if self.current_token.type == "DELIMITER" and self.current_token.lexeme == self.current_delimiter:
+                token = self.current_token
+                self.advance()
+                return token
+        else:
+            # 多字符分隔符
+            delimiter_chars = list(self.current_delimiter)
+            for i, char in enumerate(delimiter_chars):
+                if not self.current_token or self.current_token.type != "DELIMITER" or self.current_token.lexeme != char:
+                    context_info = f"{context}:expected_delimiter_{self.current_delimiter}_got_{self.current_token.lexeme if self.current_token else 'EOF'}"
+                    raise ParseError(f"Expected delimiter '{self.current_delimiter}' but got '{self.current_token.lexeme if self.current_token else 'EOF'}'", self.current_token, context_info)
+                self.advance()
+            return None  # 多字符分隔符不需要返回token
+        
+        context_info = f"{context}:expected_delimiter_{self.current_delimiter}_got_{self.current_token.lexeme if self.current_token else 'EOF'}"
+        raise ParseError(f"Expected delimiter '{self.current_delimiter}' but got '{self.current_token.lexeme if self.current_token else 'EOF'}'", self.current_token, context_info)
 
     def parse(self):
         """入口，返回 AST 列表（支持多条 SQL 语句）"""
         ast_list = []
         while self.current_token:
-            node = self.statement()
-            ast_list.append(node)
+            # 检查是否是 DELIMITER 语句
+            if self.current_token.lexeme.upper() == "DELIMITER":
+                delimiter_node = self.delimiter_statement()
+                ast_list.append(delimiter_node)
+            else:
+                node = self.statement()
+                ast_list.append(node)
         return ast_list
+
+    def delimiter_statement(self):
+        """解析 DELIMITER 语句"""
+        self.expect("KEYWORD", "DELIMITER")
+        
+        # 获取新的分隔符（可能由多个字符组成）
+        if not self.current_token:
+            raise ParseError("Expected delimiter after DELIMITER keyword", None, "delimiter_expected")
+        
+        new_delimiter = ""
+        # 收集所有分隔符字符，直到遇到空格或行结束
+        while self.current_token and self.current_token.type == "DELIMITER":
+            new_delimiter += self.current_token.lexeme
+            self.advance()
+        
+        if not new_delimiter:
+            raise ParseError("Expected delimiter after DELIMITER keyword", None, "delimiter_expected")
+        
+        # 更新当前分隔符
+        self.current_delimiter = new_delimiter
+        
+        # DELIMITER 语句本身以分号结束，不是以新的分隔符结束
+        # 检查是否有分号结束符
+        if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+            self.advance()
+        
+        # 返回 DELIMITER 节点
+        return ASTNode("DELIMITER_STATEMENT", new_delimiter)
 
     def statement(self):
         if self.current_token.lexeme.upper() == "CREATE":
@@ -231,6 +295,8 @@ class Parser:
                         if unique_next_token.lexeme.upper() == "INDEX":
                             return self.create_index()
                     return self.create_table()
+                elif next_token.lexeme.upper() == "TRIGGER":
+                    return self.create_trigger()
                 else:
                     return self.create_table()
             else:
@@ -250,6 +316,8 @@ class Parser:
                 next_token = self.tokens[next_token_idx]
                 if next_token.lexeme.upper() == "INDEX":
                     return self.drop_index()
+                elif next_token.lexeme.upper() == "TRIGGER":
+                    return self.drop_trigger()
                 else:
                     return self.drop_table()
             else:
@@ -346,7 +414,11 @@ class Parser:
                 break
                 
         self.expect("DELIMITER", ")")
-        self.expect("DELIMITER", ";")
+        # 检查当前分隔符，如果是分号则直接处理，否则使用 expect_delimiter
+        if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+            self.advance()
+        else:
+            self.expect_delimiter()
         
         # 构建 AST 节点
         children = [ASTNode("COLUMN", col_name + ":" + col_type) for col_name, col_type in columns]
@@ -383,16 +455,37 @@ class Parser:
         values = []
         while True:
             val_token = self.current_token
-            if val_token.type not in ["CONST", "IDENTIFIER"]:
+            # 在触发器上下文中，允许 OLD/NEW 引用
+            if self.in_trigger_context and val_token.lexeme.upper() in ["OLD", "NEW"]:
+                # 解析 OLD.column 或 NEW.column
+                prefix = val_token.lexeme.upper()
+                self.advance()
+                self.expect("DELIMITER", ".")
+                column = self.expect("IDENTIFIER").lexeme
+                values.append(f"{prefix}.{column}")
+            elif val_token.type not in ["CONST", "IDENTIFIER"]:
                 raise ParseError("Expected constant or identifier", val_token)
-            values.append(val_token.lexeme)
-            self.advance()
+            else:
+                values.append(val_token.lexeme)
+                self.advance()
+            
             if self.current_token.lexeme == ",":
                 self.advance()
             else:
                 break
         self.expect("DELIMITER", ")")
-        self.expect("DELIMITER", ";")
+        # 在触发器上下文中，总是期望分号结束
+        if self.in_trigger_context:
+            if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+                self.advance()
+            else:
+                raise ParseError(f"Expected ';' in trigger context, got '{self.current_token.lexeme if self.current_token else 'EOF'}'", self.current_token, "trigger_insert_end")
+        else:
+            # 检查当前分隔符，如果是分号则直接处理，否则使用 expect_delimiter
+            if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+                self.advance()
+            else:
+                self.expect_delimiter()
         return ASTNode("INSERT", table_name, [ASTNode("COLUMN", col) for col in columns] + [ASTNode("VALUE", v) for v in values])
 
     def select(self):
@@ -443,7 +536,7 @@ class Parser:
         if self.current_token and self.current_token.lexeme.upper() == "ORDER":
             order_by_node = self.parse_order_by()
             
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         
         # 构建 AST
         children = []
@@ -573,7 +666,7 @@ class Parser:
         where_node = None
         if self.current_token and self.current_token.lexeme.upper() == "WHERE":
             where_node = self.parse_where()
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         children = []
         if where_node:
             children.append(where_node)
@@ -587,13 +680,19 @@ class Parser:
         # 解析 SET 子句
         assignments = []
         while True:
-            col_name = self.expect("IDENTIFIER").lexeme
+            # 在 SET 子句中，列名可能是关键字（如 count, sum 等）
+            if self.current_token.type == "IDENTIFIER":
+                col_name = self.current_token.lexeme
+                self.advance()
+            elif self.current_token.type == "KEYWORD":
+                col_name = self.current_token.lexeme
+                self.advance()
+            else:
+                raise ParseError("Expected column name", self.current_token)
+            
             self.expect("OPERATOR", "=")
-            val_token = self.current_token
-            if val_token.type not in ["CONST", "IDENTIFIER"]:
-                raise ParseError("Expected constant or identifier", val_token)
-            value = val_token.lexeme
-            self.advance()
+            # 解析赋值表达式（可能包含运算符和多个操作数）
+            value = self.parse_assignment_expression()
             assignments.append((col_name, value))
             
             if self.current_token.lexeme == ",":
@@ -606,13 +705,45 @@ class Parser:
         if self.current_token and self.current_token.lexeme.upper() == "WHERE":
             where_node = self.parse_where()
             
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         
         children = [ASTNode("ASSIGNMENT", f"{col}={val}") for col, val in assignments]
         if where_node:
             children.append(where_node)
             
         return ASTNode("UPDATE", table_name, children)
+    
+    def parse_assignment_expression(self):
+        """解析赋值表达式，如 count + 1, count * 2 等"""
+        # 解析第一个操作数
+        left = self.parse_assignment_operand()
+        
+        # 检查是否有运算符
+        if self.current_token and self.current_token.type == "OPERATOR" and self.current_token.lexeme in ["+", "-", "*", "/"]:
+            operator = self.current_token.lexeme
+            self.advance()
+            right = self.parse_assignment_operand()
+            return f"{left} {operator} {right}"
+        else:
+            return left
+    
+    def parse_assignment_operand(self):
+        """解析赋值表达式中的操作数"""
+        if self.current_token.type == "CONST":
+            val = self.current_token.lexeme
+            self.advance()
+            return val
+        elif self.current_token.type == "IDENTIFIER":
+            val = self.current_token.lexeme
+            self.advance()
+            return val
+        elif self.current_token.type == "KEYWORD":
+            # 在赋值表达式中，关键字可能表示列名
+            val = self.current_token.lexeme
+            self.advance()
+            return val
+        else:
+            raise ParseError(f"Expected operand in assignment expression, got {self.current_token.type}", self.current_token)
 
     def parse_qualified_identifier(self):
         """解析可能带有表名限定的标识符 (table.column 或 column)"""
@@ -737,6 +868,17 @@ class Parser:
             return val
         elif self.current_token.type == "IDENTIFIER":
             return self.parse_qualified_identifier()
+        elif (self.current_token.type == "KEYWORD" and 
+              self.current_token.lexeme.upper() in ["NEW", "OLD"]):
+            # 在触发器中，NEW 和 OLD 是特殊的关键字，需要特殊处理
+            prefix = self.current_token.lexeme.upper()
+            self.advance()
+            if self.current_token and self.current_token.lexeme == ".":
+                self.advance()  # 跳过 '.'
+                column = self.expect("IDENTIFIER").lexeme
+                return f"{prefix}.{column}"
+            else:
+                return prefix
         else:
             raise ParseError(f"Expected value or identifier, got {self.current_token.type}")
     
@@ -774,7 +916,7 @@ class Parser:
         self.expect("KEYWORD", "DROP")
         self.expect("KEYWORD", "TABLE")
         table_name = self.expect("IDENTIFIER").lexeme
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         return ASTNode("DROP_TABLE", table_name)
 
     def begin_transaction(self):
@@ -783,7 +925,7 @@ class Parser:
         # TRANSACTION 或 WORK 是可选的
         if self.current_token and self.current_token.lexeme.upper() in ["TRANSACTION", "WORK"]:
             self.advance()
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         return ASTNode("BEGIN_TRANSACTION")
 
     def commit(self):
@@ -792,7 +934,7 @@ class Parser:
         # WORK 是可选的
         if self.current_token and self.current_token.lexeme.upper() == "WORK":
             self.advance()
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         return ASTNode("COMMIT")
 
     def rollback(self):
@@ -801,7 +943,7 @@ class Parser:
         # WORK 是可选的
         if self.current_token and self.current_token.lexeme.upper() == "WORK":
             self.advance()
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         return ASTNode("ROLLBACK")
 
     def create_index(self):
@@ -851,7 +993,7 @@ class Parser:
         if self.current_token and self.current_token.lexeme.upper() == "WHERE":
             where_condition = self.parse_where()
         
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         
         # 构建 AST 节点
         index_node = ASTNode("CREATE_INDEX", index_name)
@@ -877,13 +1019,208 @@ class Parser:
             self.advance()
             table_name = self.expect("IDENTIFIER").lexeme
         
-        self.expect("DELIMITER", ";")
+        self.expect_delimiter()
         
         drop_node = ASTNode("DROP_INDEX", index_name)
         if table_name:
             drop_node.children.append(ASTNode("TABLE", table_name))
         
         return drop_node
+    
+    def create_trigger(self):
+        """解析 CREATE TRIGGER 语句"""
+        self.expect("KEYWORD", "CREATE")
+        self.expect("KEYWORD", "TRIGGER")
+        trigger_name = self.expect("IDENTIFIER").lexeme
+        
+        # 触发时机: BEFORE | AFTER | INSTEAD OF
+        timing = None
+        if self.current_token and self.current_token.lexeme.upper() in ["BEFORE", "AFTER"]:
+            timing = self.current_token.lexeme.upper()
+            self.advance()
+        elif self.current_token and self.current_token.lexeme.upper() == "INSTEAD":
+            timing = "INSTEAD"
+            self.advance()
+            self.expect("KEYWORD", "OF")
+            timing = "INSTEAD OF"
+        else:
+            raise ParseError("Expected BEFORE, AFTER, or INSTEAD OF", self.current_token, "trigger_timing")
+        
+        # 触发事件: INSERT | UPDATE | DELETE
+        events = []
+        while True:
+            if self.current_token and self.current_token.lexeme.upper() in ["INSERT", "UPDATE", "DELETE"]:
+                events.append(self.current_token.lexeme.upper())
+                self.advance()
+                
+                # 检查是否有 OR 连接多个事件
+                if self.current_token and self.current_token.lexeme.upper() == "OR":
+                    self.advance()
+                    continue
+                else:
+                    break
+            else:
+                break
+        
+        if not events:
+            raise ParseError("Expected trigger event (INSERT, UPDATE, DELETE)", self.current_token, "trigger_event")
+        
+        # ON table_name
+        self.expect("KEYWORD", "ON")
+        table_name = self.expect("IDENTIFIER").lexeme
+        
+        # 可选的 FOR EACH ROW
+        for_each_row = False
+        if self.current_token and self.current_token.lexeme.upper() == "FOR":
+            self.advance()
+            self.expect("KEYWORD", "EACH")
+            self.expect("KEYWORD", "ROW")
+            for_each_row = True
+        
+        # 可选的 WHEN 条件
+        when_condition = None
+        if self.current_token and self.current_token.lexeme.upper() == "WHEN":
+            self.advance()
+            # 解析条件表达式
+            when_condition = self.parse_trigger_condition()
+        
+        # 触发器主体: BEGIN ... END 或单个语句
+        trigger_body = self.parse_trigger_body()
+        
+        # 触发器定义不需要额外的分隔符，因为触发器内部的语句已经以分号结束了
+        # self.expect_delimiter()
+        
+        # 构建 AST 节点
+        trigger_node = ASTNode("CREATE_TRIGGER", trigger_name)
+        trigger_node.children.append(ASTNode("TIMING", timing))
+        trigger_node.children.append(ASTNode("EVENTS", ",".join(events)))
+        trigger_node.children.append(ASTNode("TABLE", table_name))
+        trigger_node.children.append(ASTNode("FOR_EACH_ROW", str(for_each_row)))
+        
+        if when_condition:
+            trigger_node.children.append(when_condition)
+        
+        trigger_node.children.append(trigger_body)
+        
+        return trigger_node
+    
+    def drop_trigger(self):
+        """解析 DROP TRIGGER 语句"""
+        self.expect("KEYWORD", "DROP")
+        self.expect("KEYWORD", "TRIGGER")
+        trigger_name = self.expect("IDENTIFIER").lexeme
+        
+        # 可选的 ON table_name
+        table_name = None
+        if self.current_token and self.current_token.lexeme.upper() == "ON":
+            self.advance()
+            table_name = self.expect("IDENTIFIER").lexeme
+        
+        self.expect_delimiter()
+        
+        drop_node = ASTNode("DROP_TRIGGER", trigger_name)
+        if table_name:
+            drop_node.children.append(ASTNode("TABLE", table_name))
+        
+        return drop_node
+    
+    def parse_trigger_condition(self):
+        """解析触发器 WHEN 条件"""
+        # 简化版本：支持基本的比较表达式
+        # 例如: WHEN OLD.price != NEW.price
+        left_operand = self.parse_trigger_operand()
+        
+        if self.current_token and self.current_token.type == "OPERATOR":
+            operator = self.current_token.lexeme
+            self.advance()
+            right_operand = self.parse_trigger_operand()
+            
+            condition_node = ASTNode("WHEN_CONDITION")
+            condition_node.children.append(ASTNode("LEFT", left_operand))
+            condition_node.children.append(ASTNode("OPERATOR", operator))
+            condition_node.children.append(ASTNode("RIGHT", right_operand))
+            return condition_node
+        else:
+            # 单个操作数作为条件
+            return ASTNode("WHEN_CONDITION", left_operand)
+    
+    def parse_trigger_operand(self):
+        """解析触发器操作数（支持 OLD.column, NEW.column）"""
+        if self.current_token and self.current_token.lexeme.upper() in ["OLD", "NEW"]:
+            prefix = self.current_token.lexeme.upper()
+            self.advance()
+            self.expect("DELIMITER", ".")
+            column = self.expect("IDENTIFIER").lexeme
+            return f"{prefix}.{column}"
+        elif self.current_token and self.current_token.type == "IDENTIFIER":
+            return self.current_token.lexeme
+        elif self.current_token and self.current_token.type == "CONST":
+            return self.current_token.lexeme
+        else:
+            raise ParseError("Expected operand in trigger condition", self.current_token, "trigger_operand")
+    
+    def parse_trigger_body(self):
+        """解析触发器主体"""
+        if self.current_token and self.current_token.lexeme.upper() == "BEGIN":
+            # BEGIN ... END 块
+            self.advance()
+            statements = []
+            
+            while self.current_token and self.current_token.lexeme.upper() != "END":
+                # 解析触发器内部的语句
+                stmt = self.parse_trigger_statement()
+                statements.append(stmt)
+            
+            self.expect("KEYWORD", "END")
+            # END 后面可能有分号，需要消费掉
+            if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+                self.advance()
+            
+            body_node = ASTNode("TRIGGER_BODY")
+            for stmt in statements:
+                body_node.children.append(stmt)
+            return body_node
+        else:
+            # 单个语句 - 不需要分号结束，因为触发器定义本身会以分号结束
+            old_delimiter = self.current_delimiter
+            self.current_delimiter = ""  # 临时清空分隔符，避免期望分号
+            stmt = self.parse_trigger_statement()
+            self.current_delimiter = old_delimiter  # 恢复分隔符
+            body_node = ASTNode("TRIGGER_BODY")
+            body_node.children.append(stmt)
+            return body_node
+    
+    def parse_trigger_statement(self):
+        """解析触发器内部的语句"""
+        # 设置触发器上下文标志
+        old_context = self.in_trigger_context
+        old_delimiter = self.current_delimiter
+        self.in_trigger_context = True
+        self.current_delimiter = ";"  # 触发器内部语句使用分号结束
+        
+        try:
+            # 简化版本：支持基本的 INSERT, UPDATE, DELETE 语句
+            if self.current_token and self.current_token.lexeme.upper() == "INSERT":
+                return self.insert()
+            elif self.current_token and self.current_token.lexeme.upper() == "UPDATE":
+                return self.update()
+            elif self.current_token and self.current_token.lexeme.upper() == "DELETE":
+                return self.delete()
+            else:
+                # 其他语句类型（如变量赋值等）暂时作为通用语句处理
+                stmt_text = ""
+                while self.current_token and (self.current_token.type != "DELIMITER" or self.current_token.lexeme != ";"):
+                    stmt_text += self.current_token.lexeme + " "
+                    self.advance()
+                
+                if self.current_token and self.current_token.type == "DELIMITER" and self.current_token.lexeme == ";":
+                    self.advance()
+                
+                return ASTNode("TRIGGER_STATEMENT", stmt_text.strip())
+        finally:
+            # 恢复原来的上下文标志和分隔符
+            self.in_trigger_context = old_context
+            self.current_delimiter = old_delimiter
 
 # 测试
 if __name__ == "__main__":

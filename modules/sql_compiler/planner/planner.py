@@ -70,6 +70,10 @@ class Planner:
                 plan = self.plan_transaction(ast)
             elif stmt_type in ["CREATE_INDEX", "DROP_INDEX"]:
                 plan = self.plan_index(ast)
+            elif stmt_type in ["CREATE_TRIGGER", "DROP_TRIGGER"]:
+                plan = self.plan_trigger(ast)
+            elif stmt_type == "DELIMITER_STATEMENT":
+                plan = self.plan_delimiter(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             
@@ -195,6 +199,62 @@ class Planner:
             )
         else:
             raise PlanError(f"未知的索引语句类型: {stmt_type}")
+    
+    def plan_trigger(self, ast):
+        """生成触发器操作的执行计划"""
+        stmt_type = ast["type"]
+        
+        if stmt_type == "CREATE_TRIGGER":
+            # 从 AST 对象中提取触发器信息
+            trigger_name = ast.get("value", "")
+            timing = ""
+            events = []
+            table_name = ""
+            for_each_row = False
+            when_condition = None
+            trigger_body = None
+            
+            # 从 children 中提取信息
+            for child in ast.get("children", []):
+                if child.get("type") == "TIMING":
+                    timing = child.get("value", "")
+                elif child.get("type") == "EVENTS":
+                    events = child.get("value", "").split(",") if child.get("value") else []
+                elif child.get("type") == "TABLE":
+                    table_name = child.get("value", "")
+                elif child.get("type") == "FOR_EACH_ROW":
+                    for_each_row = child.get("value", "False") == "True"
+                elif child.get("type") == "WHEN_CONDITION":
+                    when_condition = child
+                elif child.get("type") == "TRIGGER_BODY":
+                    trigger_body = child
+            
+            return LogicalPlan(
+                "CreateTrigger",
+                trigger_name=trigger_name,
+                timing=timing,
+                events=events,
+                table_name=table_name,
+                for_each_row=for_each_row,
+                when_condition=when_condition,
+                trigger_body=trigger_body
+            )
+        elif stmt_type == "DROP_TRIGGER":
+            return LogicalPlan(
+                "DropTrigger",
+                trigger_name=ast.get("trigger_name", ""),
+                table_name=ast.get("table_name")
+            )
+        else:
+            raise PlanError(f"未知的触发器语句类型: {stmt_type}")
+    
+    def plan_delimiter(self, ast):
+        """生成 DELIMITER 语句的执行计划"""
+        delimiter = ast.get("value", "")
+        return LogicalPlan(
+            "DelimiterStatement",
+            delimiter=delimiter
+        )
 
 
 if __name__ == "__main__":

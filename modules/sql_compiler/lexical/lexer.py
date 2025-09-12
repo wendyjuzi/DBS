@@ -136,6 +136,9 @@ class Lexer:
             self.add_token("OPERATOR", char, self.line, start_col)
         elif char in "(),;.*":
             self.add_token("DELIMITER", char, self.line, start_col)
+        elif char in "$@#%&":
+            # 支持常见的自定义分隔符字符
+            self.add_token("DELIMITER", char, self.line, start_col)
         else:
             self.add_error(ERROR_TYPES["UNKNOWN_SYMBOL"], char, self.line, start_col)
 

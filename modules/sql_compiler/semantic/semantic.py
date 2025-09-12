@@ -187,6 +187,10 @@ class SemanticAnalyzer:
             self._check_transaction_statement(ast)
         elif node_type in ["CREATE_INDEX", "DROP_INDEX"]:
             self._check_index_statement(ast)
+        elif node_type in ["CREATE_TRIGGER", "DROP_TRIGGER"]:
+            self._check_trigger_statement(ast)
+        elif node_type == "DELIMITER_STATEMENT":
+            self._check_delimiter_statement(ast)
 
     def _check_create(self, ast):
         table_name = ast.value
@@ -312,12 +316,14 @@ class SemanticAnalyzer:
                 )
             expected_type = self.catalog.get_column_type(table_name, col)
             if expected_type == "INT":
-                if not str(val).isdigit():
-                    raise SemanticError(
-                        "TypeError", col, f"期望 INT, 但得到 {val}",
-                        available_tables=self._get_available_tables(),
-                        available_columns=self._get_available_columns()
-                    )
+                # 跳过触发器引用（OLD.column, NEW.column）的类型检查
+                if not (str(val).startswith("OLD.") or str(val).startswith("NEW.")):
+                    if not str(val).isdigit():
+                        raise SemanticError(
+                            "TypeError", col, f"期望 INT, 但得到 {val}",
+                            available_tables=self._get_available_tables(),
+                            available_columns=self._get_available_columns()
+                        )
             elif expected_type == "VARCHAR":
                 if not isinstance(val, str):
                     raise SemanticError(
@@ -631,7 +637,7 @@ class SemanticAnalyzer:
             
             if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
                 raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
-        
+            
             # 检查右侧如果是列名
             if right and not str(right.value).replace(".", "").isdigit():
                 # 如果不是数字，检查是否是列名
@@ -835,3 +841,130 @@ class SemanticAnalyzer:
         # 未来可以扩展 catalog 来管理索引信息
         
         print(f"[OK] DROP INDEX {index_name} 语义检查通过")
+    
+    def _check_trigger_statement(self, ast):
+        """检查触发器语句的语义正确性"""
+        if ast.node_type == "CREATE_TRIGGER":
+            self._check_create_trigger(ast)
+        elif ast.node_type == "DROP_TRIGGER":
+            self._check_drop_trigger(ast)
+    
+    def _check_create_trigger(self, ast):
+        """检查 CREATE TRIGGER 语句"""
+        trigger_name = ast.value
+        
+        # 获取触发器相关信息
+        timing_node = next((c for c in ast.children if c.node_type == "TIMING"), None)
+        events_node = next((c for c in ast.children if c.node_type == "EVENTS"), None)
+        table_node = next((c for c in ast.children if c.node_type == "TABLE"), None)
+        for_each_row_node = next((c for c in ast.children if c.node_type == "FOR_EACH_ROW"), None)
+        
+        if not timing_node:
+            raise SemanticError("TriggerError", trigger_name, "CREATE TRIGGER 语句缺少触发时机")
+        
+        if not events_node:
+            raise SemanticError("TriggerError", trigger_name, "CREATE TRIGGER 语句缺少触发事件")
+        
+        if not table_node:
+            raise SemanticError("TriggerError", trigger_name, "CREATE TRIGGER 语句缺少表名")
+        
+        timing = timing_node.value
+        events = events_node.value.split(",")
+        table_name = table_node.value
+        for_each_row = for_each_row_node.value == "True" if for_each_row_node else False
+        
+        # 检查表是否存在
+        if not self.catalog.has_table(table_name):
+            raise SemanticError(
+                "TableError", table_name, f"触发器 '{trigger_name}' 引用的表 '{table_name}' 不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
+        
+        # 检查触发时机是否有效
+        valid_timings = ["BEFORE", "AFTER", "INSTEAD OF"]
+        if timing not in valid_timings:
+            raise SemanticError(
+                "TriggerError", trigger_name, f"不支持的触发时机: {timing}"
+            )
+        
+        # 检查触发事件是否有效
+        valid_events = ["INSERT", "UPDATE", "DELETE"]
+        for event in events:
+            event = event.strip()
+            if event not in valid_events:
+                raise SemanticError(
+                    "TriggerError", trigger_name, f"不支持的触发事件: {event}"
+                )
+        
+        # 检查 WHEN 条件（如果存在）
+        when_condition = next((c for c in ast.children if c.node_type == "WHEN_CONDITION"), None)
+        if when_condition:
+            self._check_trigger_when_condition(when_condition, table_name)
+        
+        # 检查触发器主体
+        trigger_body = next((c for c in ast.children if c.node_type == "TRIGGER_BODY"), None)
+        if trigger_body:
+            self._check_trigger_body(trigger_body, table_name)
+        
+        print(f"[OK] CREATE TRIGGER {trigger_name} 语义检查通过")
+        print(f"    触发时机: {timing}")
+        print(f"    触发事件: {', '.join(events)}")
+        print(f"    目标表: {table_name}")
+        if for_each_row:
+            print(f"    类型: 行级触发器")
+    
+    def _check_drop_trigger(self, ast):
+        """检查 DROP TRIGGER 语句"""
+        trigger_name = ast.value
+        
+        # 目前暂时不检查触发器是否存在（需要触发器元数据管理）
+        # 未来可以扩展 catalog 来管理触发器信息
+        
+        print(f"[OK] DROP TRIGGER {trigger_name} 语义检查通过")
+    
+    def _check_trigger_when_condition(self, when_condition, table_name):
+        """检查触发器 WHEN 条件"""
+        # 检查条件中引用的列是否存在
+        for child in when_condition.children:
+            if child.node_type in ["LEFT", "RIGHT"]:
+                operand = child.value
+                if "." in operand:
+                    # OLD.column 或 NEW.column
+                    prefix, column = operand.split(".", 1)
+                    if prefix.upper() in ["OLD", "NEW"]:
+                        if not self.catalog.has_column(table_name, column):
+                            raise SemanticError(
+                                "ColumnError", column,
+                                f"触发器条件中引用的列 '{column}' 在表 '{table_name}' 中不存在",
+                                available_tables=self._get_available_tables(),
+                                available_columns=self._get_available_columns()
+                            )
+    
+    def _check_trigger_body(self, trigger_body, table_name):
+        """检查触发器主体"""
+        # 简化检查：确保触发器主体不为空
+        if not trigger_body.children:
+            raise SemanticError(
+                "TriggerError", "trigger_body", "触发器主体不能为空"
+            )
+        
+        # 递归检查触发器主体中的语句
+        for stmt in trigger_body.children:
+            if stmt.node_type in ["INSERT", "UPDATE", "DELETE", "SELECT"]:
+                # 对于触发器内部的 SQL 语句，进行递归检查。
+                # 为了让仅编译器阶段顺利通过，对于表不存在等运行期依赖问题，降级为警告。
+                try:
+                    self._analyze_node(stmt)
+                except SemanticError as e:
+                    if getattr(e, 'error_type', '') in ("TableError",):
+                        print(f"[WARN] 触发器主体内语句跳过严格检查：{e}")
+                        continue
+                    raise
+            # 其他语句类型暂时跳过检查
+    
+    def _check_delimiter_statement(self, ast):
+        """检查 DELIMITER 语句"""
+        delimiter = ast.value
+        print(f"[OK] DELIMITER 语句语义检查通过")
+        print(f"    新分隔符: '{delimiter}'")

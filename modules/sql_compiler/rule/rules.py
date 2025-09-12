@@ -8,6 +8,10 @@ KEYWORDS = {
     "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "WORK",
     # 索引相关
     "INDEX", "UNIQUE", "BTREE", "HASH", "USING",
+    # 触发器相关
+    "TRIGGER", "BEFORE", "AFTER", "INSTEAD", "OF", "FOR", "EACH", "ROW", "WHEN", "OLD", "NEW", "REFERENCING", "END",
+    # 分隔符控制
+    "DELIMITER",
     # 逻辑操作符
     "AND", "OR", "NOT",
     # 范围查询
