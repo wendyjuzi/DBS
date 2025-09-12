@@ -93,7 +93,15 @@ class SmartErrorDiagnostic:
             'VARCHARE': 'VARCHAR',
             'VARCHA': 'VARCHAR',
             'INTEGR': 'INTEGER',
-            'INEGER': 'INTEGER'
+            'INEGER': 'INTEGER',
+            # 事务相关拼写错误
+            'TRAN': 'TRANSACTION',
+            'TRANS': 'TRANSACTION',
+            'TRANSACT': 'TRANSACTION',
+            'BEGINN': 'BEGIN',
+            'COMMITT': 'COMMIT',
+            'ROLLBAK': 'ROLLBACK',
+            'ROLLBAC': 'ROLLBACK'
         }
 
         # SQL关键字
@@ -103,7 +111,9 @@ class SmartErrorDiagnostic:
             'INNER', 'LEFT', 'RIGHT', 'ON', 'GROUP', 'BY', 'ORDER',
             'ASC', 'DESC', 'HAVING', 'UNION', 'ALL', 'DISTINCT',
             'AS', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN',
-            'IS', 'NULL', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN'
+            'IS', 'NULL', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN',
+            # 事务相关关键字
+            'BEGIN', 'COMMIT', 'ROLLBACK', 'TRANSACTION', 'WORK'
         }
 
         # 数据类型
@@ -277,6 +287,23 @@ class SmartErrorDiagnostic:
                         example=f"尝试添加: {keyword}"
                     ))
 
+        # 特殊处理事务语句错误
+        if "Expected token type DELIMITER but got IDENTIFIER" in error_msg:
+            if got.upper() in ['TRAN', 'TRANS', 'TRANSACT']:
+                suggestions.append(ErrorSuggestion(
+                    suggestion=f"'{got}' 不是有效的关键字，您可能想输入 'TRANSACTION'",
+                    confidence=0.95,
+                    fix_type="transaction_keyword_correction",
+                    example="正确格式: BEGIN TRANSACTION; 或 BEGIN WORK; 或简单的 BEGIN;"
+                ))
+            elif "BEGIN" in context.upper():
+                suggestions.append(ErrorSuggestion(
+                    suggestion="BEGIN 语句语法错误",
+                    confidence=0.9,
+                    fix_type="begin_statement_syntax",
+                    example="正确格式: BEGIN; 或 BEGIN TRANSACTION; 或 BEGIN WORK;"
+                ))
+        
         # 分析标识符问题
         if "identifier" in expected.lower() or "IDENTIFIER" in expected:
             if got == "*" and "SELECT" in context.upper():

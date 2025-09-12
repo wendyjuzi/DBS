@@ -222,16 +222,20 @@ class Parser:
             return self.insert()
         elif self.current_token.lexeme.upper() == "SELECT":
             return self.select()
-        elif self.current_token.lexeme.upper() == "DELETE":
-            return self.delete()
         elif self.current_token.lexeme.upper() == "UPDATE":
             return self.update()
+        elif self.current_token.lexeme.upper() == "DELETE":
+            return self.delete()
         elif self.current_token.lexeme.upper() == "DROP":
             return self.drop_table()
+        elif self.current_token.lexeme.upper() == "BEGIN":
+            return self.begin_transaction()
+        elif self.current_token.lexeme.upper() == "COMMIT":
+            return self.commit()
+        elif self.current_token.lexeme.upper() == "ROLLBACK":
+            return self.rollback()
         else:
-            # 提供上下文信息给智能诊断
-            context = f"statement_start:{self.current_token.lexeme}"
-            raise ParseError(f"Unknown statement '{self.current_token.lexeme}'", self.current_token, context)
+            raise ParseError(f"Unsupported statement beginning with '{self.current_token.lexeme}'", self.current_token)
 
     def create_table(self):
         self.expect("KEYWORD", "CREATE")
@@ -746,6 +750,33 @@ class Parser:
         table_name = self.expect("IDENTIFIER").lexeme
         self.expect("DELIMITER", ";")
         return ASTNode("DROP_TABLE", table_name)
+
+    def begin_transaction(self):
+        """解析 BEGIN TRANSACTION 语句"""
+        self.expect("KEYWORD", "BEGIN")
+        # TRANSACTION 或 WORK 是可选的
+        if self.current_token and self.current_token.lexeme.upper() in ["TRANSACTION", "WORK"]:
+            self.advance()
+        self.expect("DELIMITER", ";")
+        return ASTNode("BEGIN_TRANSACTION")
+
+    def commit(self):
+        """解析 COMMIT 语句"""
+        self.expect("KEYWORD", "COMMIT")
+        # WORK 是可选的
+        if self.current_token and self.current_token.lexeme.upper() == "WORK":
+            self.advance()
+        self.expect("DELIMITER", ";")
+        return ASTNode("COMMIT")
+
+    def rollback(self):
+        """解析 ROLLBACK 语句"""
+        self.expect("KEYWORD", "ROLLBACK")
+        # WORK 是可选的
+        if self.current_token and self.current_token.lexeme.upper() == "WORK":
+            self.advance()
+        self.expect("DELIMITER", ";")
+        return ASTNode("ROLLBACK")
 
 # 测试
 if __name__ == "__main__":

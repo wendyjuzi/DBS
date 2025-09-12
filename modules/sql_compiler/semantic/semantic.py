@@ -172,6 +172,8 @@ class SemanticAnalyzer:
             self._check_delete(ast)
         elif node_type == "DROP_TABLE":
             self._check_drop(ast)
+        elif node_type in ["BEGIN_TRANSACTION", "COMMIT", "ROLLBACK"]:
+            self._check_transaction_statement(ast)
 
     def _check_create(self, ast):
         table_name = ast.value
@@ -616,7 +618,7 @@ class SemanticAnalyzer:
             
             if left and not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
                 raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
-                
+        
             # 检查右侧如果是列名
             if right and not str(right.value).replace(".", "").isdigit():
                 # 如果不是数字，检查是否是列名
@@ -745,3 +747,7 @@ class SemanticAnalyzer:
                 available_tables=self._get_available_tables(),
                 available_columns=self._get_available_columns()
             )
+
+    def _check_transaction_statement(self, ast):
+        """检查事务控制语句（目前仅通过）"""
+        print(f"[OK] {ast.node_type} 语义检查通过")

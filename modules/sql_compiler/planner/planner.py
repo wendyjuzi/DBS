@@ -66,6 +66,8 @@ class Planner:
                 plan = self.plan_delete(ast)
             elif stmt_type == "DROP_TABLE":
                 plan = self.plan_drop(ast)
+            elif stmt_type in ["BEGIN_TRANSACTION", "COMMIT", "ROLLBACK"]:
+                plan = self.plan_transaction(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             
@@ -155,6 +157,19 @@ class Planner:
 
     def plan_drop(self, ast):
         return LogicalPlan("DropTable", table=ast["table"])
+
+    def plan_transaction(self, ast):
+        """生成事务控制语句的执行计划"""
+        stmt_type = ast["type"]
+        
+        if stmt_type == "BEGIN_TRANSACTION":
+            return LogicalPlan("BeginTransaction")
+        elif stmt_type == "COMMIT":
+            return LogicalPlan("Commit")
+        elif stmt_type == "ROLLBACK":
+            return LogicalPlan("Rollback")
+        else:
+            raise PlanError(f"未知的事务语句类型: {stmt_type}")
 
 
 if __name__ == "__main__":

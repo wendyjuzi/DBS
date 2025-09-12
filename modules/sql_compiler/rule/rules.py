@@ -4,6 +4,8 @@ KEYWORDS = {
     "UPDATE", "SET", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "ON", 
     "ORDER", "BY", "GROUP", "ASC", "DESC", "HAVING", "PRIMARY", "KEY", "FOREIGN",
     "REFERENCES", "CONSTRAINT", "NOT", "NULL", "UNIQUE", "DROP",
+    # 事务控制
+    "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "WORK",
     # 逻辑操作符
     "AND", "OR", "NOT",
     # 范围查询
