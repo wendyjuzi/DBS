@@ -72,6 +72,8 @@ class Planner:
                 plan = self.plan_index(ast)
             elif stmt_type in ["CREATE_TRIGGER", "DROP_TRIGGER"]:
                 plan = self.plan_trigger(ast)
+            elif stmt_type in ["CREATE_VIEW", "DROP_VIEW"]:
+                plan = self.plan_view(ast)
             elif stmt_type == "DELIMITER_STATEMENT":
                 plan = self.plan_delimiter(ast)
             else:
@@ -248,6 +250,28 @@ class Planner:
         else:
             raise PlanError(f"未知的触发器语句类型: {stmt_type}")
     
+    def plan_view(self, ast):
+        """生成视图操作的执行计划"""
+        stmt_type = ast["type"]
+        
+        if stmt_type == "CREATE_VIEW":
+            return LogicalPlan(
+                "CreateView",
+                view_name=ast.get("view", ""),
+                materialized=ast.get("materialized", False),
+                columns=ast.get("columns", []),
+                query=ast.get("query")
+            )
+        elif stmt_type == "DROP_VIEW":
+            return LogicalPlan(
+                "DropView",
+                view_name=ast.get("view", ""),
+                if_exists=ast.get("if_exists", False),
+                drop_behavior=ast.get("drop_behavior")
+            )
+        else:
+            raise PlanError(f"未知的视图语句类型: {stmt_type}")
+
     def plan_delimiter(self, ast):
         """生成 DELIMITER 语句的执行计划"""
         delimiter = ast.get("value", "")

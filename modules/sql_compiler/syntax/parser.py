@@ -174,6 +174,29 @@ class ASTNode:
                 
         elif self.node_type == "DROP_TABLE":
             result["table"] = self.value
+        elif self.node_type == "CREATE_VIEW":
+            result["view"] = self.value
+            result["materialized"] = False
+            result["columns"] = []
+            result["query"] = None
+            
+            for child in self.children:
+                if child.node_type == "MATERIALIZED":
+                    result["materialized"] = child.value == "True"
+                elif child.node_type == "COLUMNS":
+                    result["columns"] = child.value.split(",") if child.value else []
+                elif child.node_type == "QUERY":
+                    result["query"] = child.children[0].to_dict() if child.children else None
+        elif self.node_type == "DROP_VIEW":
+            result["view"] = self.value
+            result["if_exists"] = False
+            result["drop_behavior"] = None
+            
+            for child in self.children:
+                if child.node_type == "IF_EXISTS":
+                    result["if_exists"] = child.value == "TRUE"
+                elif child.node_type == "DROP_BEHAVIOR":
+                    result["drop_behavior"] = child.value
         else:
             # 默认格式，用于其他类型的节点
             result["value"] = self.value
@@ -297,6 +320,16 @@ class Parser:
                     return self.create_table()
                 elif next_token.lexeme.upper() == "TRIGGER":
                     return self.create_trigger()
+                elif next_token.lexeme.upper() == "VIEW":
+                    return self.create_view()
+                elif next_token.lexeme.upper() == "MATERIALIZED":
+                    # 检查 CREATE MATERIALIZED VIEW
+                    mat_next_idx = self.pos + 2
+                    if mat_next_idx < len(self.tokens):
+                        mat_next_token = self.tokens[mat_next_idx]
+                        if mat_next_token.lexeme.upper() == "VIEW":
+                            return self.create_view()
+                    return self.create_table()
                 else:
                     return self.create_table()
             else:
@@ -318,6 +351,8 @@ class Parser:
                     return self.drop_index()
                 elif next_token.lexeme.upper() == "TRIGGER":
                     return self.drop_trigger()
+                elif next_token.lexeme.upper() == "VIEW":
+                    return self.drop_view()
                 else:
                     return self.drop_table()
             else:
@@ -1251,6 +1286,76 @@ class Parser:
             # 恢复原来的上下文标志和分隔符
             self.in_trigger_context = old_context
             self.current_delimiter = old_delimiter
+
+    def create_view(self):
+        """解析 CREATE VIEW 或 CREATE MATERIALIZED VIEW 语句"""
+        self.expect("KEYWORD", "CREATE")
+        
+        # 检查是否是物化视图
+        is_materialized = False
+        if self.current_token and self.current_token.lexeme.upper() == "MATERIALIZED":
+            is_materialized = True
+            self.advance()
+        
+        self.expect("KEYWORD", "VIEW")
+        view_name = self.expect("IDENTIFIER").lexeme
+        
+        # 可选的列名列表
+        columns = []
+        if self.current_token and self.current_token.lexeme == "(":
+            self.advance()  # 跳过 (
+            while True:
+                col_name = self.expect("IDENTIFIER").lexeme
+                columns.append(col_name)
+                if self.current_token and self.current_token.lexeme == ",":
+                    self.advance()
+                else:
+                    break
+            self.expect("DELIMITER", ")")
+        
+        self.expect("KEYWORD", "AS")
+        
+        # 解析视图定义的 SELECT 语句
+        view_query = self.select()
+        
+        # 构建 AST 节点
+        view_node = ASTNode("CREATE_VIEW", view_name)
+        view_node.children.append(ASTNode("MATERIALIZED", str(is_materialized)))
+        if columns:
+            view_node.children.append(ASTNode("COLUMNS", ",".join(columns)))
+        view_node.children.append(ASTNode("QUERY", None, [view_query]))
+        
+        return view_node
+    
+    def drop_view(self):
+        """解析 DROP VIEW 语句"""
+        self.expect("KEYWORD", "DROP")
+        self.expect("KEYWORD", "VIEW")
+        
+        # 可选的 IF EXISTS
+        if_exists = False
+        if self.current_token and self.current_token.lexeme.upper() == "IF":
+            self.advance()
+            self.expect("KEYWORD", "EXISTS")
+            if_exists = True
+        
+        view_name = self.expect("IDENTIFIER").lexeme
+        
+        # 可选的 CASCADE/RESTRICT
+        drop_behavior = None
+        if self.current_token and self.current_token.lexeme.upper() in ["CASCADE", "RESTRICT"]:
+            drop_behavior = self.current_token.lexeme.upper()
+            self.advance()
+        
+        self.expect_delimiter()
+        
+        drop_node = ASTNode("DROP_VIEW", view_name)
+        if if_exists:
+            drop_node.children.append(ASTNode("IF_EXISTS", "TRUE"))
+        if drop_behavior:
+            drop_node.children.append(ASTNode("DROP_BEHAVIOR", drop_behavior))
+        
+        return drop_node
 
 # 测试
 if __name__ == "__main__":

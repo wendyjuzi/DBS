@@ -53,6 +53,7 @@ class Catalog:
         self.primary_keys = {}  # {table_name: [primary_key_columns]}
         self.foreign_keys = {}  # {table_name: [{column: str, references_table: str, references_column: str}]}
         self.constraints = {}  # {table_name: {column_name: [constraints]}} (NOT NULL, UNIQUE等)
+        self.views = {}  # {view_name: {columns: {column_name: column_type}, query: dict, materialized: bool}}
 
     def create_table(self, table_name, columns, primary_keys=None, foreign_keys=None, constraints=None):
         if table_name in self.tables:
@@ -83,6 +84,36 @@ class Catalog:
         del self.primary_keys[table_name]
         del self.foreign_keys[table_name]
         del self.constraints[table_name]
+
+    def create_view(self, view_name, columns, query, materialized=False):
+        """创建视图"""
+        if view_name in self.views:
+            raise SemanticError("ViewError", view_name, "视图已存在")
+        if view_name in self.tables:
+            raise SemanticError("ViewError", view_name, "视图名与已存在的表名冲突")
+        
+        self.views[view_name] = {
+            'columns': columns,
+            'query': query,
+            'materialized': materialized
+        }
+
+    def drop_view(self, view_name):
+        """删除视图"""
+        if view_name not in self.views:
+            raise SemanticError("ViewError", view_name, "要删除的视图不存在")
+        
+        del self.views[view_name]
+
+    def has_view(self, view_name):
+        """检查视图是否存在"""
+        return view_name in self.views
+
+    def get_view_columns(self, view_name):
+        """获取视图的列信息"""
+        if view_name not in self.views:
+            return {}
+        return self.views[view_name]['columns']
 
     def has_table(self, table_name):
         return table_name in self.tables
@@ -189,6 +220,8 @@ class SemanticAnalyzer:
             self._check_index_statement(ast)
         elif node_type in ["CREATE_TRIGGER", "DROP_TRIGGER"]:
             self._check_trigger_statement(ast)
+        elif node_type in ["CREATE_VIEW", "DROP_VIEW"]:
+            self._check_view_statement(ast)
         elif node_type == "DELIMITER_STATEMENT":
             self._check_delimiter_statement(ast)
 
@@ -963,6 +996,69 @@ class SemanticAnalyzer:
                     raise
             # 其他语句类型暂时跳过检查
     
+    def _check_view_statement(self, ast):
+        """检查视图语句（CREATE VIEW / DROP VIEW）"""
+        node_type = ast.node_type
+        view_name = ast.value
+        
+        if node_type == "CREATE_VIEW":
+            print(f"[OK] CREATE VIEW {view_name} 语义检查通过")
+            
+            # 提取视图信息
+            materialized = False
+            columns = []
+            query = None
+            
+            for child in ast.children:
+                if child.node_type == "MATERIALIZED":
+                    materialized = child.value == "True"
+                elif child.node_type == "COLUMNS":
+                    columns = child.value.split(",") if child.value else []
+                elif child.node_type == "QUERY":
+                    query = child.children[0] if child.children else None
+            
+            # 检查查询语句的语义
+            if query:
+                self._analyze_node(query)
+                # 如果没有显式指定列名，从查询中推导列信息
+                if not columns:
+                    # 从 SELECT 语句中提取列信息
+                    if query.node_type == "SELECT":
+                        for col_child in query.children:
+                            if col_child.node_type == "COLUMN":
+                                columns.append(col_child.value)
+            
+            # 推导视图的列类型（简化处理）
+            view_columns = {}
+            for col_name in columns:
+                view_columns[col_name] = "VARCHAR"  # 简化处理，实际应该从查询推导类型
+            
+            # 创建视图
+            self.catalog.create_view(view_name, view_columns, query, materialized)
+            print(f"    视图类型: {'物化视图' if materialized else '普通视图'}")
+            print(f"    列数: {len(columns)}")
+            
+        elif node_type == "DROP_VIEW":
+            print(f"[OK] DROP VIEW {view_name} 语义检查通过")
+            
+            # 检查视图是否存在
+            if not self.catalog.has_view(view_name):
+                # 检查是否有 IF EXISTS 子句
+                if_exists = False
+                for child in ast.children:
+                    if child.node_type == "IF_EXISTS" and child.value == "TRUE":
+                        if_exists = True
+                        break
+                
+                if not if_exists:
+                    raise SemanticError("ViewError", view_name, "要删除的视图不存在")
+                else:
+                    print(f"    [WARN] 视图 {view_name} 不存在，但使用了 IF EXISTS，忽略")
+                    return
+            
+            # 删除视图
+            self.catalog.drop_view(view_name)
+
     def _check_delimiter_statement(self, ast):
         """检查 DELIMITER 语句"""
         delimiter = ast.value
