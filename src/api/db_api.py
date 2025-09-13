@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import sys
+import os
 
 from ..core.parser.simple_sql_parser import SimpleSQLParser
 from ..core.optimizer.query_optimizer import QueryOptimizer
@@ -10,6 +12,9 @@ from ..utils.exceptions import (
     ExecutionError,
     DatabaseError,
 )
+
+# 添加 cpp_core 目录到 Python 路径
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'cpp_core'))
 
 
 class DatabaseAPI:

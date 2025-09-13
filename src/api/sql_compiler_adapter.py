@@ -852,7 +852,105 @@ class SQLCompilerAdapter:
         except Exception as e:
             print(f"[ADAPTER] 获取目录信息失败: {e}")
             return {}
-    
+
+    def export_table(self, table_name: str, format_type: str, output_path: str) -> bool:
+        """
+        导出表数据
+        """
+        try:
+            # 先获取表的列信息
+            columns = self.storage_engine.get_table_columns(table_name)
+            if not columns:
+                print(f"表 {table_name} 不存在或没有列")
+                return False
+
+            # 构建SQL语句（确保有分号）
+            column_str = ", ".join(columns)
+            sql = f"SELECT {column_str} FROM {table_name};"
+
+            print(f"[EXPORT] 执行导出查询: {sql}")
+
+            # 执行查询
+            result = self.execute(sql)
+
+            if result.get("status") == "error":
+                print(f"查询表数据失败: {result.get('error')}")
+                return False
+
+            data = result.get("data", [])
+            metadata = result.get("metadata", {})
+            result_columns = metadata.get("columns", columns)
+
+            if not data:
+                print(f"表 {table_name} 为空，无需导出")
+                return True
+
+            # 确保输出目录存在
+            from pathlib import Path
+            output_dir = Path(output_path).parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # 根据格式类型导出数据
+            if format_type.lower() == "csv":
+                return self._export_to_csv(table_name, result_columns, data, output_path)
+            elif format_type.lower() == "json":
+                return self._export_to_json(table_name, result_columns, data, output_path)
+            else:
+                print(f"不支持的导出格式: {format_type}")
+                return False
+
+        except Exception as e:
+            print(f"导出失败: {str(e)}")
+            return False
+
+    def _export_to_csv(self, table_name: str, columns: List[str], data: List[List[Any]], output_path: str) -> bool:
+        """导出数据到CSV文件"""
+        try:
+            import csv
+
+            with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+
+                # 写入表头
+                writer.writerow(columns)
+
+                # 写入数据
+                for row in data:
+                    writer.writerow(row)
+
+            print(f"成功导出 {len(data)} 行数据到 {output_path}")
+            return True
+
+        except Exception as e:
+            print(f"CSV导出失败: {str(e)}")
+            return False
+
+    def _export_to_json(self, table_name: str, columns: List[str], data: List[List[Any]], output_path: str) -> bool:
+        """导出数据到JSON文件"""
+        try:
+            import json
+
+            # 将数据转换为字典列表
+            json_data = []
+            for row in data:
+                row_dict = {}
+                for i, col in enumerate(columns):
+                    if i < len(row):
+                        row_dict[col] = row[i]
+                    else:
+                        row_dict[col] = None
+                json_data.append(row_dict)
+
+            with open(output_path, 'w', encoding='utf-8') as jsonfile:
+                json.dump(json_data, jsonfile, indent=2, ensure_ascii=False)
+
+            print(f"成功导出 {len(data)} 行数据到 {output_path}")
+            return True
+
+        except Exception as e:
+            print(f"JSON导出失败: {str(e)}")
+            return False
+
     def get_cache_stats(self) -> Dict[str, Any]:
         """获取缓存统计信息"""
         if self.hybrid_storage:

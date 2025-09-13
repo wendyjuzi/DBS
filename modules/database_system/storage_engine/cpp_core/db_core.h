@@ -541,6 +541,46 @@ public:
         
         return deleted_count;
     }
+
+    // 在 ExecutionEngine 类中添加导出方法
+    std::vector<std::vector<std::string>> export_table_data(const std::string& table_name) {
+        std::vector<std::vector<std::string>> table_data;
+
+        // 校验表是否存在
+        auto schema_opt = storage.get_catalog().get_table_schema(table_name);
+        if (!schema_opt) return table_data;
+
+        // 获取所有行数据
+        auto all_rows = seq_scan(table_name);
+
+        // 添加表头（列名）
+        std::vector<std::string> header;
+        for (const auto& col : schema_opt->columns) {
+            header.push_back(col.name);
+        }
+        table_data.push_back(header);
+
+        // 添加数据行
+        for (const auto& row : all_rows) {
+            table_data.push_back(row->get_values());
+        }
+
+        return table_data;
+    }
+
+    // 添加获取表结构的方法
+    std::vector<std::string> get_table_columns(const std::string& table_name) {
+        std::vector<std::string> columns;
+
+        auto schema_opt = storage.get_catalog().get_table_schema(table_name);
+        if (!schema_opt) return columns;
+
+        for (const auto& col : schema_opt->columns) {
+            columns.push_back(col.name);
+        }
+
+        return columns;
+    }
 };
 
 #endif // DB_CORE_H

@@ -9,7 +9,9 @@ from ...utils.wal import WALManager, LogRecord
 from ...utils.logging import get_logger
 from ...index.index_manager import IndexManager
 from ...utils.exceptions import ExecutionError, CatalogError
-
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 class HybridExecutionEngine:
     """混合架构执行引擎，Python调度C++算子"""
@@ -899,3 +901,23 @@ class HybridExecutionEngine:
             }
         else:
             raise ExecutionError(f"表 '{table_name}' 不存在或删除失败")
+
+    def export_table(self, table_name: str, format_type: str, output_path: str) -> bool:
+        """
+        导出表数据
+
+        Args:
+            table_name: 表名
+            format_type: 导出格式 (csv/json)
+            output_path: 输出路径
+
+        Returns:
+            bool: 导出是否成功
+        """
+        if format_type.lower() == 'csv':
+            return self.exporter.export_table_to_csv(table_name, output_path)
+        elif format_type.lower() == 'json':
+            return self.exporter.export_table_to_json(table_name, output_path)
+        else:
+            print(f"❌ 不支持的导出格式: {format_type}")
+            return False

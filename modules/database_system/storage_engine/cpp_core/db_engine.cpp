@@ -50,5 +50,10 @@ PYBIND11_MODULE(db_core, m) {
              py::arg("table_name"), py::arg("input_rows"), py::arg("target_columns"))
         // Delete：返回删除行数
         .def("delete_rows", &ExecutionEngine::delete_rows, 
-             py::arg("table_name"), py::arg("predicate"));
+             py::arg("table_name"), py::arg("predicate"))
+        // 在 ExecutionEngine 绑定中添加导出数据
+        .def("export_table_data", &ExecutionEngine::export_table_data,
+             py::arg("table_name"))
+        .def("get_table_columns", &ExecutionEngine::get_table_columns,
+             py::arg("table_name"));
 }

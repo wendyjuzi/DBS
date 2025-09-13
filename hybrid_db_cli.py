@@ -32,7 +32,7 @@ class HybridDatabaseCLI:
             self.core_engine = HybridDatabaseEngine()
             self.mode = "adapter"  # adapter | core
             print("=== 混合架构数据库系统 (SQL编译器 + C++执行引擎) ===")
-            print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE, DROP TABLE")
+            print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE, DROP TABLE, EXPORT TABLE")
             print("输入 'exit' 退出, 'help' 查看帮助, 'tables' 显示所有表")
             print("输入 'cache' 查看缓存统计, 'flushcache' 刷新缓存到磁盘")
             print("输入 'BEGIN' 开启事务, 'COMMIT' 提交, 'ROLLBACK' 回滚")
@@ -56,7 +56,12 @@ class HybridDatabaseCLI:
                 sql_lines = []
                 while True:
                     line = input("db> " if not sql_lines else "  > ").strip()
-                    
+
+                    # 检查是否是导出命令
+                    if line.upper().startswith("EXPORT TABLE"):
+                        self._handle_export_command(line)
+                        continue
+
                     if not line and not sql_lines:
                         continue
                     
@@ -289,7 +294,8 @@ class HybridDatabaseCLI:
   SELECT ... FROM table1 JOIN table2 ON col1=col2        - 表连接
   SELECT ... FROM table ORDER BY col [ASC/DESC]          - 排序查询
   SELECT ... FROM table GROUP BY col                     - 分组查询
-  
+  EXPORT TABLE table_name TO format PATH 'file_path'    - 导出数据
+
 🔎 索引命令:
   CREATE INDEX idx ON table(col) PK pkcol;               - 创建单列二级索引
   CREATE COMPOSITE INDEX idx ON table(col1,col2);        - 创建复合索引（内存雏形）
@@ -319,7 +325,11 @@ class HybridDatabaseCLI:
   INT     - 整数
   STRING  - 字符串
   DOUBLE  - 浮点数
-
+  
+📤 支持的导出格式:
+  csv  - 逗号分隔值文件
+  json - JSON数据文件
+  
 ⚠️  语法限制 (适配 modules/sql_compiler):
   - 不支持 PRIMARY KEY 语法
   - 不支持 * 通配符，必须指定具体列名
@@ -334,6 +344,8 @@ class HybridDatabaseCLI:
   UPDATE students SET score = 90.0 WHERE id = 1;
   DELETE FROM students WHERE id = 1;
   DROP TABLE students;
+  EXPORT TABLE students TO csv PATH 'students.csv';
+  EXPORT TABLE students TO json PATH 'students.json';
   
   -- 高级查询示例:
   SELECT s.name, c.course FROM students s JOIN courses c ON s.id = c.student_id;
@@ -385,6 +397,11 @@ class HybridDatabaseCLI:
    ✅ SELECT col1, COUNT(*) FROM table GROUP BY col1;
    ✅ SELECT col1, SUM(col2) FROM table GROUP BY col1;
    ❌ SELECT * FROM table GROUP BY col1;
+   
+9. EXPORT TABLE:
+   ✅ EXPORT TABLE table_name TO csv PATH 'file.csv';
+   ✅ EXPORT TABLE table_name TO json PATH 'file.json';
+   ❌ EXPORT TABLE table_name TO xml PATH 'file.xml';
         """
         print(syntax_help)
 
@@ -457,6 +474,60 @@ class HybridDatabaseCLI:
         except Exception as e:
             print(f" 显示覆盖层失败: {str(e)}")
 
+    def _handle_export_command(self, command: str):
+        """处理导出命令: EXPORT TABLE table_name TO format PATH 'path'"""
+        try:
+            # 移除末尾的分号（如果存在）
+            if command.endswith(';'):
+                command = command[:-1].strip()
+
+            parts = command.split()
+            if len(parts) >= 7 and parts[0].upper() == "EXPORT" and parts[1].upper() == "TABLE":
+                table_name = parts[2]
+                if parts[3].upper() != "TO":
+                    raise ValueError("缺少 TO 关键字")
+
+                format_type = parts[4].lower()
+                if parts[5].upper() != "PATH":
+                    raise ValueError("缺少 PATH 关键字")
+
+                # 处理路径（可能包含空格，需要合并）
+                path_parts = parts[6:]
+                path = ' '.join(path_parts).strip("'\"")
+
+                # 移除路径中可能的分号
+                if path.endswith(';'):
+                    path = path[:-1]
+
+                # 直接调用 adapter 的 export_table 方法
+                success = self.adapter.export_table(table_name, format_type, path)
+                if success:
+                    print(f"✓ 导出成功: {table_name} → {path}")
+                else:
+                    print("❌ 导出失败")
+            else:
+                print("❌ 导出命令格式错误")
+                self._show_export_help()
+
+        except Exception as e:
+            print(f"❌ 导出命令解析错误: {str(e)}")
+            self._show_export_help()
+
+    def _show_export_help(self):
+        """显示导出帮助信息"""
+        help_text = """
+📤 数据导出命令格式:
+    EXPORT TABLE table_name TO format PATH 'file_path'
+
+💡 示例:
+    EXPORT TABLE students TO csv PATH 'data/students.csv'
+    EXPORT TABLE employees TO json PATH 'exports/employees.json'
+
+📊 支持的导出格式:
+    csv  - 逗号分隔值文件
+    json - JSON数据文件
+        """
+        print(help_text)
 
 def main():
     """主函数"""
