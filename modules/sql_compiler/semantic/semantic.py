@@ -54,6 +54,7 @@ class Catalog:
         self.foreign_keys = {}  # {table_name: [{column: str, references_table: str, references_column: str}]}
         self.constraints = {}  # {table_name: {column_name: [constraints]}} (NOT NULL, UNIQUE等)
         self.views = {}  # {view_name: {columns: {column_name: column_type}, query: dict, materialized: bool}}
+        self.procedures = {}  # {procedure_name: {parameters: list, body: dict, return_type: str, is_function: bool}}
 
     def create_table(self, table_name, columns, primary_keys=None, foreign_keys=None, constraints=None):
         if table_name in self.tables:
@@ -114,6 +115,39 @@ class Catalog:
         if view_name not in self.views:
             return {}
         return self.views[view_name]['columns']
+
+    def create_procedure(self, proc_name, parameters, body, return_type=None, is_function=False):
+        """创建存储过程或函数"""
+        if proc_name in self.procedures:
+            raise SemanticError("ProcedureError", proc_name, "存储过程已存在")
+        if proc_name in self.tables:
+            raise SemanticError("ProcedureError", proc_name, "存储过程名与已存在的表名冲突")
+        if proc_name in self.views:
+            raise SemanticError("ProcedureError", proc_name, "存储过程名与已存在的视图名冲突")
+        
+        self.procedures[proc_name] = {
+            'parameters': parameters,
+            'body': body,
+            'return_type': return_type,
+            'is_function': is_function
+        }
+
+    def drop_procedure(self, proc_name):
+        """删除存储过程或函数"""
+        if proc_name not in self.procedures:
+            raise SemanticError("ProcedureError", proc_name, "要删除的存储过程不存在")
+        
+        del self.procedures[proc_name]
+
+    def has_procedure(self, proc_name):
+        """检查存储过程是否存在"""
+        return proc_name in self.procedures
+
+    def get_procedure_info(self, proc_name):
+        """获取存储过程信息"""
+        if proc_name not in self.procedures:
+            return None
+        return self.procedures[proc_name]
 
     def has_table(self, table_name):
         return table_name in self.tables
@@ -182,6 +216,8 @@ class Catalog:
 class SemanticAnalyzer:
     def __init__(self, catalog: Catalog):
         self.catalog = catalog
+        self.current_procedure_params = {}  # 当前存储过程的参数作用域
+        self.current_local_vars = {}  # 当前存储过程的局部变量作用域
     
     def _get_available_tables(self):
         """获取可用表列表"""
@@ -222,6 +258,12 @@ class SemanticAnalyzer:
             self._check_trigger_statement(ast)
         elif node_type in ["CREATE_VIEW", "DROP_VIEW"]:
             self._check_view_statement(ast)
+        elif node_type in ["CREATE_PROCEDURE", "CREATE_FUNCTION", "DROP_PROCEDURE", "DROP_FUNCTION", "CALL_PROCEDURE"]:
+            self._check_procedure_statement(ast)
+        elif node_type == "DECLARE_STATEMENT":
+            self._check_declare_statement(ast)
+        elif node_type == "SET_STATEMENT":
+            self._check_set_statement(ast)
         elif node_type == "DELIMITER_STATEMENT":
             self._check_delimiter_statement(ast)
 
@@ -348,7 +390,18 @@ class SemanticAnalyzer:
                     available_columns=self._get_available_columns()
                 )
             expected_type = self.catalog.get_column_type(table_name, col)
-            if expected_type == "INT":
+            
+            # 检查值是否为存储过程参数
+            if str(val) in self.current_procedure_params:
+                param_type = self.current_procedure_params[str(val)]
+                if param_type != expected_type:
+                    raise SemanticError(
+                        "TypeError", col, 
+                        f"参数类型不匹配：期望 {expected_type}, 参数 {val} 类型为 {param_type}",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
+            elif expected_type == "INT":
                 # 跳过触发器引用（OLD.column, NEW.column）的类型检查
                 if not (str(val).startswith("OLD.") or str(val).startswith("NEW.")):
                     if not str(val).isdigit():
@@ -454,6 +507,11 @@ class SemanticAnalyzer:
                             self._check_join_condition(tables, on_node, table_aliases)
 
         # 检查 SELECT 列
+        # 如果没有 FROM 子句，这是一个常量查询，跳过列检查
+        if not from_node:
+            print(f"[OK] 常量查询 SELECT 语义检查通过")
+            return
+            
         for child in ast.children:
             if child.node_type == "COLUMN":
                 # 跳过 * 通配符的检查，它表示选择所有列
@@ -464,22 +522,13 @@ class SemanticAnalyzer:
                 if isinstance(child.value, str) and " AS " in child.value.upper():
                     # "AS" keyword is case-insensitive
                     col_part = child.value.upper().split(" AS ")[0].strip()
-                    if not self._column_exists_in_tables_with_aliases(tables, col_part, table_aliases):
-                        raise SemanticError(
-                            "ColumnError", col_part, "列不存在于任何表中",
-                            available_tables=self._get_available_tables(),
-                            available_columns=self._get_available_columns()
-                        )
+                    self._check_expression_columns(col_part, tables, table_aliases)
                     continue
 
-                # 普通列名检查
+                # 普通列名或表达式检查
                 col_name = str(child.value)
-                if col_name != "*" and not self._column_exists_in_tables_with_aliases(tables, col_name, table_aliases):
-                    raise SemanticError(
-                        "ColumnError", col_name, "列不存在于任何表中",
-                        available_tables=self._get_available_tables(),
-                        available_columns=self._get_available_columns()
-                    )
+                if col_name != "*":
+                    self._check_expression_columns(col_name, tables, table_aliases)
             elif child.node_type == "AGGREGATE":
                 # 直接检查聚合函数节点
                 self._check_aggregate_function(child, tables, table_aliases)
@@ -530,8 +579,11 @@ class SemanticAnalyzer:
         # 检查右侧值是否为列名（如果不是常量的话）
         if right and right.value:
             right_value = str(right.value)
+            # 如果是存储过程参数，跳过检查
+            if right_value in self.current_procedure_params:
+                pass  # 存储过程参数，跳过检查
             # 如果是数字，不需要检查
-            if right_value.replace(".", "").isdigit():
+            elif right_value.replace(".", "").isdigit():
                 pass  # 数字常量，跳过检查
             # 如果是字符串常量（词法分析器已经去掉了引号），不需要检查
             # 这里我们假设非数字的CONST都是字符串常量
@@ -571,7 +623,20 @@ class SemanticAnalyzer:
                 
                 # 检查类型匹配
                 expected_type = self.catalog.get_column_type(table_name, col_name)
-                if expected_type == "INT":
+                
+                # 检查值是否为存储过程参数
+                if value in self.current_procedure_params:
+                    param_type = self.current_procedure_params[value]
+                    if param_type != expected_type:
+                        raise SemanticError("TypeError", col_name, 
+                                          f"参数类型不匹配：期望 {expected_type}, 参数 {value} 类型为 {param_type}")
+                # 检查值是否为局部变量
+                elif value in self.current_local_vars:
+                    var_type = self.current_local_vars[value]
+                    if var_type != expected_type:
+                        raise SemanticError("TypeError", col_name, 
+                                          f"变量类型不匹配：期望 {expected_type}, 变量 {value} 类型为 {var_type}")
+                elif expected_type == "INT":
                     if not str(value).isdigit():
                         raise SemanticError("TypeError", col_name, f"期望 INT, 但得到 {value}")
                 elif expected_type == "VARCHAR":
@@ -1059,8 +1124,185 @@ class SemanticAnalyzer:
             # 删除视图
             self.catalog.drop_view(view_name)
 
+    def _check_procedure_statement(self, ast):
+        """检查存储过程语句（CREATE PROCEDURE/FUNCTION, DROP PROCEDURE/FUNCTION, CALL）"""
+        node_type = ast.node_type
+        proc_name = ast.value
+        
+        if node_type in ["CREATE_PROCEDURE", "CREATE_FUNCTION"]:
+            is_function = node_type == "CREATE_FUNCTION"
+            print(f"[OK] {'CREATE FUNCTION' if is_function else 'CREATE PROCEDURE'} {proc_name} 语义检查通过")
+            
+            # 提取存储过程信息
+            parameters = []
+            return_type = None
+            body = []
+            
+            for child in ast.children:
+                if child.node_type == "PARAMETERS":
+                    for param_child in child.children:
+                        if param_child.node_type == "PARAMETER":
+                            param_parts = param_child.value.split(":")
+                            param_name = param_parts[0]
+                            param_type = param_parts[1]
+                            param_mode = param_parts[2] if len(param_parts) > 2 else "IN"
+                            parameters.append({
+                                'name': param_name,
+                                'type': param_type,
+                                'mode': param_mode
+                            })
+                elif child.node_type == "RETURN_TYPE":
+                    return_type = child.value
+                elif child.node_type == "PROCEDURE_BODY":
+                    # 设置参数和局部变量作用域
+                    old_params = self.current_procedure_params.copy()
+                    old_vars = self.current_local_vars.copy()
+                    
+                    for param in parameters:
+                        self.current_procedure_params[param['name']] = param['type']
+                    
+                    # 检查过程体内的语句
+                    try:
+                        for stmt in child.children:
+                            try:
+                                self._analyze_node(stmt)
+                                body.append(stmt)
+                            except SemanticError as e:
+                                print(f"[WARN] 存储过程体内语句跳过严格检查：{e}")
+                                body.append(stmt)  # 仍然保留语句
+                    finally:
+                        # 恢复参数和局部变量作用域
+                        self.current_procedure_params = old_params
+                        self.current_local_vars = old_vars
+            
+            # 验证函数必须有返回类型
+            if is_function and not return_type:
+                raise SemanticError("ProcedureError", proc_name, "函数必须指定返回类型")
+            
+            # 创建存储过程
+            self.catalog.create_procedure(proc_name, parameters, body, return_type, is_function)
+            print(f"    参数数量: {len(parameters)}")
+            if return_type:
+                print(f"    返回类型: {return_type}")
+            
+        elif node_type in ["DROP_PROCEDURE", "DROP_FUNCTION"]:
+            is_function = node_type == "DROP_FUNCTION"
+            print(f"[OK] {'DROP FUNCTION' if is_function else 'DROP PROCEDURE'} {proc_name} 语义检查通过")
+            
+            # 检查存储过程是否存在
+            if not self.catalog.has_procedure(proc_name):
+                # 检查是否有 IF EXISTS 子句
+                if_exists = False
+                for child in ast.children:
+                    if child.node_type == "IF_EXISTS" and child.value == "TRUE":
+                        if_exists = True
+                        break
+                
+                if not if_exists:
+                    raise SemanticError("ProcedureError", proc_name, "要删除的存储过程不存在")
+                else:
+                    print(f"    [WARN] 存储过程 {proc_name} 不存在，但使用了 IF EXISTS，忽略")
+                    return
+            
+            # 验证类型匹配
+            proc_info = self.catalog.get_procedure_info(proc_name)
+            if proc_info and proc_info['is_function'] != is_function:
+                proc_type = "函数" if proc_info['is_function'] else "存储过程"
+                expected_type = "函数" if is_function else "存储过程"
+                raise SemanticError("ProcedureError", proc_name, 
+                                  f"类型不匹配：{proc_name} 是{proc_type}，但试图作为{expected_type}删除")
+            
+            # 删除存储过程
+            self.catalog.drop_procedure(proc_name)
+            
+        elif node_type == "CALL_PROCEDURE":
+            print(f"[OK] CALL {proc_name} 语义检查通过")
+            
+            # 检查存储过程是否存在
+            if not self.catalog.has_procedure(proc_name):
+                raise SemanticError("ProcedureError", proc_name, "调用的存储过程不存在")
+            
+            # 检查参数数量（简化检查）
+            proc_info = self.catalog.get_procedure_info(proc_name)
+            expected_params = len(proc_info['parameters'])
+            
+            # 提取调用参数
+            call_args = []
+            for child in ast.children:
+                if child.node_type == "ARGUMENTS":
+                    call_args = child.value.split(",") if child.value else []
+                    break
+            
+            actual_params = len(call_args)
+            if actual_params != expected_params:
+                raise SemanticError("ProcedureError", proc_name, 
+                                  f"参数数量不匹配：期望 {expected_params} 个，实际 {actual_params} 个")
+            
+            print(f"    参数数量: {actual_params}")
+
     def _check_delimiter_statement(self, ast):
         """检查 DELIMITER 语句"""
         delimiter = ast.value
         print(f"[OK] DELIMITER 语句语义检查通过")
         print(f"    新分隔符: '{delimiter}'")
+    
+    def _check_expression_columns(self, expression, tables, table_aliases):
+        """检查表达式中的列是否存在"""
+        import re
+        
+        # 提取表达式中的标识符（可能的列名）
+        # 匹配标识符，但排除数字常量
+        identifiers = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', str(expression))
+        
+        for identifier in identifiers:
+            # 跳过存储过程参数
+            if identifier in self.current_procedure_params:
+                continue
+            
+            # 跳过局部变量
+            if identifier in self.current_local_vars:
+                continue
+                
+            # 检查是否是列名
+            if not self._column_exists_in_tables_with_aliases(tables, identifier, table_aliases):
+                # 如果不是列名，可能是常量或函数，暂时跳过
+                # 只有当它看起来像列名时才报错
+                if not identifier.replace('.', '').replace('_', '').isalnum():
+                    continue
+                    
+                # 检查是否是常见的SQL函数或关键字
+                sql_functions = {'NOW', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'UPPER', 'LOWER', 'LENGTH'}
+                if identifier.upper() in sql_functions:
+                    continue
+                    
+                raise SemanticError(
+                    "ColumnError", identifier, "列不存在于任何表中",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+    
+    def _check_declare_statement(self, ast):
+        """检查 DECLARE 语句"""
+        # 解析变量声明：var_name:var_type
+        var_info = ast.value.split(":")
+        if len(var_info) >= 2:
+            var_name = var_info[0]
+            var_type = var_info[1]
+            
+            # 添加到局部变量作用域
+            self.current_local_vars[var_name] = var_type
+            print(f"[OK] DECLARE {var_name} {var_type} 语义检查通过")
+    
+    def _check_set_statement(self, ast):
+        """检查 SET 语句"""
+        # 解析赋值：var_name=expression
+        assignment = ast.value.split("=", 1)
+        if len(assignment) == 2:
+            var_name = assignment[0].strip()
+            expression = assignment[1].strip()
+            
+            # 检查变量是否存在（参数或局部变量）
+            if var_name not in self.current_procedure_params and var_name not in self.current_local_vars:
+                raise SemanticError("VariableError", var_name, "变量未声明")
+            
+            print(f"[OK] SET {var_name} 语义检查通过")

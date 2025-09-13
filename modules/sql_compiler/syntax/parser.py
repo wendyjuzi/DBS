@@ -88,6 +88,10 @@ class ASTNode:
         elif self.node_type == "SELECT":
             result["columns"] = [child.value for child in self.children if child.node_type == "COLUMN"]
             
+            # 处理 INTO 子句
+            into_node = next((child for child in self.children if child.node_type == "INTO"), None)
+            result["into_variable"] = into_node.value if into_node else None
+            
             # 处理 FROM 子句
             from_node = next((child for child in self.children if child.node_type == "FROM"), None)
             joins = []
@@ -197,6 +201,42 @@ class ASTNode:
                     result["if_exists"] = child.value == "TRUE"
                 elif child.node_type == "DROP_BEHAVIOR":
                     result["drop_behavior"] = child.value
+        elif self.node_type in ["CREATE_PROCEDURE", "CREATE_FUNCTION"]:
+            result["procedure"] = self.value
+            result["is_function"] = self.node_type == "CREATE_FUNCTION"
+            result["parameters"] = []
+            result["return_type"] = None
+            result["body"] = []
+            
+            for child in self.children:
+                if child.node_type == "PARAMETERS":
+                    for param_child in child.children:
+                        if param_child.node_type == "PARAMETER":
+                            param_parts = param_child.value.split(":")
+                            result["parameters"].append({
+                                "name": param_parts[0],
+                                "type": param_parts[1],
+                                "mode": param_parts[2] if len(param_parts) > 2 else "IN"
+                            })
+                elif child.node_type == "RETURN_TYPE":
+                    result["return_type"] = child.value
+                elif child.node_type == "PROCEDURE_BODY":
+                    result["body"] = [stmt.to_dict() for stmt in child.children]
+        elif self.node_type in ["DROP_PROCEDURE", "DROP_FUNCTION"]:
+            result["procedure"] = self.value
+            result["is_function"] = self.node_type == "DROP_FUNCTION"
+            result["if_exists"] = False
+            
+            for child in self.children:
+                if child.node_type == "IF_EXISTS":
+                    result["if_exists"] = child.value == "TRUE"
+        elif self.node_type == "CALL_PROCEDURE":
+            result["procedure"] = self.value
+            result["arguments"] = []
+            
+            for child in self.children:
+                if child.node_type == "ARGUMENTS":
+                    result["arguments"] = child.value.split(",") if child.value else []
         else:
             # 默认格式，用于其他类型的节点
             result["value"] = self.value
@@ -322,6 +362,8 @@ class Parser:
                     return self.create_trigger()
                 elif next_token.lexeme.upper() == "VIEW":
                     return self.create_view()
+                elif next_token.lexeme.upper() in ["PROCEDURE", "FUNCTION"]:
+                    return self.create_procedure()
                 elif next_token.lexeme.upper() == "MATERIALIZED":
                     # 检查 CREATE MATERIALIZED VIEW
                     mat_next_idx = self.pos + 2
@@ -353,6 +395,8 @@ class Parser:
                     return self.drop_trigger()
                 elif next_token.lexeme.upper() == "VIEW":
                     return self.drop_view()
+                elif next_token.lexeme.upper() in ["PROCEDURE", "FUNCTION"]:
+                    return self.drop_procedure()
                 else:
                     return self.drop_table()
             else:
@@ -363,6 +407,8 @@ class Parser:
             return self.commit()
         elif self.current_token.lexeme.upper() == "ROLLBACK":
             return self.rollback()
+        elif self.current_token.lexeme.upper() == "CALL":
+            return self.call_procedure()
         else:
             raise ParseError(f"Unsupported statement beginning with '{self.current_token.lexeme}'", self.current_token)
 
@@ -532,12 +578,19 @@ class Parser:
             if self.current_token and self.current_token.type == "OPERATOR" and self.current_token.lexeme == "*":
                 columns.append("*")
                 self.advance()
-            elif self.current_token and self.current_token.lexeme.upper() in ["COUNT", "SUM", "AVG", "MAX", "MIN"]:
-                # 解析聚合函数
-                func_node = self.parse_aggregate_function()
-                columns.append(func_node)
             else:
-                col_expr = self.parse_qualified_identifier()
+                # 解析列表达式（聚合函数、常量或标识符）
+                if self.current_token and self.current_token.lexeme.upper() in ["COUNT", "SUM", "AVG", "MAX", "MIN"]:
+                    # 解析聚合函数
+                    col_expr = self.parse_aggregate_function()
+                elif self.current_token and self.current_token.type == "CONST":
+                    # 解析常量（如 SELECT 1, SELECT 'hello'）
+                    col_expr = self.current_token.lexeme
+                    self.advance()
+                else:
+                    # 解析表达式（可能包含算术运算）
+                    col_expr = self.parse_expression()
+                
                 # 检查是否有别名 (AS alias)
                 if self.current_token and self.current_token.lexeme.upper() == "AS":
                     self.advance()  # 跳过 AS
@@ -550,11 +603,19 @@ class Parser:
                 self.advance()
             else:
                 break
-                
-        self.expect("KEYWORD", "FROM")
         
-        # 解析 FROM 子句和可能的 JOIN
-        from_clause = self.parse_from_clause()
+        # 可选 INTO 子句（用于存储过程中的变量赋值）
+        into_variable = None
+        if self.current_token and self.current_token.lexeme.upper() == "INTO":
+            self.advance()  # 跳过 INTO
+            into_variable = self.expect("IDENTIFIER").lexeme
+        
+        # 可选 FROM 子句（支持 SELECT 常量的情况）
+        from_clause = None
+        if self.current_token and self.current_token.lexeme.upper() == "FROM":
+            self.expect("KEYWORD", "FROM")
+            # 解析 FROM 子句和可能的 JOIN
+            from_clause = self.parse_from_clause()
         
         # 可选 WHERE 子句
         where_node = None
@@ -582,7 +643,10 @@ class Parser:
             else:
                 children.append(ASTNode("COLUMN", c))
 
-        children.append(from_clause)
+        if into_variable:
+            children.append(ASTNode("INTO", into_variable))
+        if from_clause:
+            children.append(from_clause)
         if where_node:
             children.append(where_node)
         if group_by_node:
@@ -1356,6 +1420,395 @@ class Parser:
             drop_node.children.append(ASTNode("DROP_BEHAVIOR", drop_behavior))
         
         return drop_node
+
+    def create_procedure(self):
+        """解析 CREATE PROCEDURE 或 CREATE FUNCTION 语句"""
+        self.expect("KEYWORD", "CREATE")
+        
+        # 判断是 PROCEDURE 还是 FUNCTION
+        proc_type = self.current_token.lexeme.upper()
+        is_function = proc_type == "FUNCTION"
+        self.expect("KEYWORD", proc_type)
+        
+        proc_name = self.expect("IDENTIFIER").lexeme
+        
+        # 解析参数列表
+        parameters = []
+        if self.current_token and self.current_token.lexeme == "(":
+            self.advance()  # 跳过 (
+            
+            while self.current_token and self.current_token.lexeme != ")":
+                # 解析参数模式 (IN/OUT/INOUT，可选)
+                param_mode = "IN"  # 默认为 IN
+                if self.current_token and self.current_token.lexeme.upper() in ["IN", "OUT", "INOUT"]:
+                    param_mode = self.current_token.lexeme.upper()
+                    self.advance()
+                
+                # 参数名
+                param_name = self.expect("IDENTIFIER").lexeme
+                
+                # 参数类型
+                param_type = self.expect("IDENTIFIER").lexeme
+                
+                parameters.append((param_name, param_type, param_mode))
+                
+                # 检查是否有更多参数
+                if self.current_token and self.current_token.lexeme == ",":
+                    self.advance()
+                else:
+                    break
+            
+            self.expect("DELIMITER", ")")
+        
+        # 函数的返回类型
+        return_type = None
+        if is_function:
+            self.expect("KEYWORD", "RETURNS")
+            return_type = self.expect("IDENTIFIER").lexeme
+        
+        # 解析过程体
+        self.expect("KEYWORD", "BEGIN")
+        
+        # 解析过程体内的语句
+        body_statements = []
+        while self.current_token and self.current_token.lexeme.upper() != "END":
+            stmt = self.parse_procedure_statement()
+            if stmt:
+                body_statements.append(stmt)
+        
+        self.expect("KEYWORD", "END")
+        self.expect_delimiter()
+        
+        # 构建 AST 节点
+        proc_node = ASTNode("CREATE_PROCEDURE" if not is_function else "CREATE_FUNCTION", proc_name)
+        
+        # 添加参数信息
+        if parameters:
+            params_node = ASTNode("PARAMETERS", None)
+            for param_name, param_type, param_mode in parameters:
+                param_node = ASTNode("PARAMETER", f"{param_name}:{param_type}:{param_mode}")
+                params_node.children.append(param_node)
+            proc_node.children.append(params_node)
+        
+        # 添加返回类型（仅函数）
+        if return_type:
+            proc_node.children.append(ASTNode("RETURN_TYPE", return_type))
+        
+        # 添加过程体
+        if body_statements:
+            body_node = ASTNode("PROCEDURE_BODY", None)
+            body_node.children.extend(body_statements)
+            proc_node.children.append(body_node)
+        
+        return proc_node
+    
+    def drop_procedure(self):
+        """解析 DROP PROCEDURE 或 DROP FUNCTION 语句"""
+        self.expect("KEYWORD", "DROP")
+        
+        proc_type = self.current_token.lexeme.upper()
+        is_function = proc_type == "FUNCTION"
+        self.expect("KEYWORD", proc_type)
+        
+        # 可选的 IF EXISTS
+        if_exists = False
+        if self.current_token and self.current_token.lexeme.upper() == "IF":
+            self.advance()
+            self.expect("KEYWORD", "EXISTS")
+            if_exists = True
+        
+        proc_name = self.expect("IDENTIFIER").lexeme
+        self.expect_delimiter()
+        
+        drop_node = ASTNode("DROP_PROCEDURE" if not is_function else "DROP_FUNCTION", proc_name)
+        if if_exists:
+            drop_node.children.append(ASTNode("IF_EXISTS", "TRUE"))
+        
+        return drop_node
+    
+    def call_procedure(self):
+        """解析 CALL 语句"""
+        self.expect("KEYWORD", "CALL")
+        proc_name = self.expect("IDENTIFIER").lexeme
+        
+        # 解析参数列表
+        arguments = []
+        if self.current_token and self.current_token.lexeme == "(":
+            self.advance()  # 跳过 (
+            
+            while self.current_token and self.current_token.lexeme != ")":
+                # 解析参数值
+                if self.current_token.type == "CONST":
+                    arguments.append(self.current_token.lexeme)
+                    self.advance()
+                elif self.current_token.type == "IDENTIFIER":
+                    arguments.append(self.current_token.lexeme)
+                    self.advance()
+                else:
+                    raise ParseError(f"Expected argument but got {self.current_token.type}", 
+                                   self.current_token.line, self.current_token.column)
+                
+                # 检查是否有更多参数
+                if self.current_token and self.current_token.lexeme == ",":
+                    self.advance()
+                else:
+                    break
+            
+            self.expect("DELIMITER", ")")
+        
+        self.expect_delimiter()
+        
+        # 构建 AST 节点
+        call_node = ASTNode("CALL_PROCEDURE", proc_name)
+        if arguments:
+            args_node = ASTNode("ARGUMENTS", ",".join(arguments))
+            call_node.children.append(args_node)
+        
+        return call_node
+    
+    def parse_procedure_statement(self):
+        """解析过程体内的语句"""
+        if not self.current_token:
+            return None
+        
+        stmt_type = self.current_token.lexeme.upper()
+        
+        # 控制流语句
+        if stmt_type == "IF":
+            return self.parse_if_statement()
+        elif stmt_type == "WHILE":
+            return self.parse_while_statement()
+        elif stmt_type == "DECLARE":
+            return self.parse_declare_statement()
+        elif stmt_type == "SET":
+            return self.parse_set_statement()
+        elif stmt_type == "RETURN":
+            return self.parse_return_statement()
+        else:
+            # 普通SQL语句 - 临时设置分隔符为分号
+            old_delimiter = self.current_delimiter
+            self.current_delimiter = ";"
+            try:
+                stmt = self.statement()
+                return stmt
+            finally:
+                self.current_delimiter = old_delimiter
+    
+    def parse_if_statement(self):
+        """解析 IF 语句"""
+        self.expect("KEYWORD", "IF")
+        
+        # 解析条件
+        condition = self.parse_condition()
+        self.expect("KEYWORD", "THEN")
+        
+        # 解析 IF 分支的语句
+        if_statements = []
+        while (self.current_token and 
+               self.current_token.lexeme.upper() not in ["ELSEIF", "ELSE", "END"]):
+            stmt = self.parse_procedure_statement()
+            if stmt:
+                if_statements.append(stmt)
+        
+        # 处理 ELSEIF 和 ELSE
+        elseif_branches = []
+        else_statements = []
+        
+        while self.current_token and self.current_token.lexeme.upper() == "ELSEIF":
+            self.advance()  # 跳过 ELSEIF
+            elseif_condition = self.parse_condition()
+            self.expect("KEYWORD", "THEN")
+            
+            elseif_stmts = []
+            while (self.current_token and 
+                   self.current_token.lexeme.upper() not in ["ELSEIF", "ELSE", "END"]):
+                stmt = self.parse_procedure_statement()
+                if stmt:
+                    elseif_stmts.append(stmt)
+            
+            elseif_branches.append((elseif_condition, elseif_stmts))
+        
+        if self.current_token and self.current_token.lexeme.upper() == "ELSE":
+            self.advance()  # 跳过 ELSE
+            while self.current_token and self.current_token.lexeme.upper() != "END":
+                stmt = self.parse_procedure_statement()
+                if stmt:
+                    else_statements.append(stmt)
+        
+        self.expect("KEYWORD", "END")
+        self.expect("KEYWORD", "IF")
+        self.expect_delimiter()
+        
+        # 构建 AST
+        if_node = ASTNode("IF_STATEMENT", None)
+        if_node.children.append(ASTNode("CONDITION", None, [condition]))
+        
+        if_body = ASTNode("IF_BODY", None)
+        if_body.children.extend(if_statements)
+        if_node.children.append(if_body)
+        
+        # 添加 ELSEIF 分支
+        for elseif_condition, elseif_stmts in elseif_branches:
+            elseif_node = ASTNode("ELSEIF", None)
+            elseif_node.children.append(ASTNode("CONDITION", None, [elseif_condition]))
+            elseif_body = ASTNode("ELSEIF_BODY", None)
+            elseif_body.children.extend(elseif_stmts)
+            elseif_node.children.append(elseif_body)
+            if_node.children.append(elseif_node)
+        
+        # 添加 ELSE 分支
+        if else_statements:
+            else_node = ASTNode("ELSE", None)
+            else_body = ASTNode("ELSE_BODY", None)
+            else_body.children.extend(else_statements)
+            else_node.children.append(else_body)
+            if_node.children.append(else_node)
+        
+        return if_node
+    
+    def parse_while_statement(self):
+        """解析 WHILE 语句"""
+        self.expect("KEYWORD", "WHILE")
+        condition = self.parse_condition()
+        self.expect("KEYWORD", "DO")
+        
+        # 解析循环体
+        loop_statements = []
+        while self.current_token and self.current_token.lexeme.upper() != "END":
+            stmt = self.parse_procedure_statement()
+            if stmt:
+                loop_statements.append(stmt)
+        
+        self.expect("KEYWORD", "END")
+        self.expect("KEYWORD", "WHILE")
+        self.expect_delimiter()
+        
+        # 构建 AST
+        while_node = ASTNode("WHILE_STATEMENT", None)
+        while_node.children.append(ASTNode("CONDITION", None, [condition]))
+        
+        loop_body = ASTNode("WHILE_BODY", None)
+        loop_body.children.extend(loop_statements)
+        while_node.children.append(loop_body)
+        
+        return while_node
+    
+    def parse_declare_statement(self):
+        """解析 DECLARE 语句"""
+        self.expect("KEYWORD", "DECLARE")
+        var_name = self.expect("IDENTIFIER").lexeme
+        var_type = self.expect("IDENTIFIER").lexeme
+        
+        # 可选的默认值
+        default_value = None
+        if self.current_token and self.current_token.lexeme.upper() == "DEFAULT":
+            self.advance()
+            if self.current_token.type in ["CONST", "IDENTIFIER"]:
+                default_value = self.current_token.lexeme
+                self.advance()
+        
+        self.expect_delimiter()
+        
+        declare_node = ASTNode("DECLARE_STATEMENT", f"{var_name}:{var_type}")
+        if default_value:
+            declare_node.children.append(ASTNode("DEFAULT_VALUE", default_value))
+        
+        return declare_node
+    
+    def parse_set_statement(self):
+        """解析 SET 语句（变量赋值）"""
+        self.expect("KEYWORD", "SET")
+        var_name = self.expect("IDENTIFIER").lexeme
+        self.expect("OPERATOR", "=")
+        
+        # 解析赋值表达式（支持算术运算）
+        value = self.parse_expression()
+        
+        self.expect_delimiter()
+        
+        set_node = ASTNode("SET_STATEMENT", f"{var_name}={value}")
+        return set_node
+    
+    def parse_return_statement(self):
+        """解析 RETURN 语句"""
+        self.expect("KEYWORD", "RETURN")
+        
+        # 可选的返回值
+        return_value = None
+        if (self.current_token and 
+            self.current_token.type in ["CONST", "IDENTIFIER"]):
+            return_value = self.current_token.lexeme
+            self.advance()
+        
+        self.expect_delimiter()
+        
+        return_node = ASTNode("RETURN_STATEMENT", return_value)
+        return return_node
+    
+    def parse_condition(self):
+        """解析条件表达式（简化版）"""
+        left = self.current_token.lexeme
+        self.advance()
+        
+        if self.current_token and self.current_token.type == "OPERATOR":
+            op = self.current_token.lexeme
+            self.advance()
+            right = self.current_token.lexeme
+            self.advance()
+            
+            condition_node = ASTNode("COMPARISON", op)
+            condition_node.children.append(ASTNode("LEFT", left))
+            condition_node.children.append(ASTNode("RIGHT", right))
+            return condition_node
+        else:
+            # 简单的布尔表达式
+            return ASTNode("IDENTIFIER", left)
+    
+    def parse_expression(self):
+        """解析表达式（支持算术运算）"""
+        left = self.parse_term()
+        
+        while (self.current_token and 
+               self.current_token.type == "OPERATOR" and 
+               self.current_token.lexeme in ["+", "-"]):
+            op = self.current_token.lexeme
+            self.advance()
+            right = self.parse_term()
+            left = f"{left} {op} {right}"
+        
+        return left
+    
+    def parse_term(self):
+        """解析项（处理乘除运算）"""
+        left = self.parse_factor()
+        
+        while (self.current_token and 
+               self.current_token.type == "OPERATOR" and 
+               self.current_token.lexeme in ["*", "/"]):
+            op = self.current_token.lexeme
+            self.advance()
+            right = self.parse_factor()
+            left = f"{left} {op} {right}"
+        
+        return left
+    
+    def parse_factor(self):
+        """解析因子（标识符、常量或括号表达式）"""
+        if self.current_token.type == "IDENTIFIER":
+            factor = self.parse_qualified_identifier()
+            return factor
+        elif self.current_token.type == "CONST":
+            factor = self.current_token.lexeme
+            self.advance()
+            return factor
+        elif self.current_token.type == "DELIMITER" and self.current_token.lexeme == "(":
+            self.advance()  # 跳过 (
+            expr = self.parse_expression()
+            self.expect("DELIMITER", ")")
+            return f"({expr})"
+        else:
+            raise ParseError(f"Unexpected token in expression: {self.current_token.lexeme}", 
+                           self.current_token.line, self.current_token.column)
 
 # 测试
 if __name__ == "__main__":

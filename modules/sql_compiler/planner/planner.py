@@ -74,6 +74,8 @@ class Planner:
                 plan = self.plan_trigger(ast)
             elif stmt_type in ["CREATE_VIEW", "DROP_VIEW"]:
                 plan = self.plan_view(ast)
+            elif stmt_type in ["CREATE_PROCEDURE", "CREATE_FUNCTION", "DROP_PROCEDURE", "DROP_FUNCTION", "CALL_PROCEDURE"]:
+                plan = self.plan_procedure(ast)
             elif stmt_type == "DELIMITER_STATEMENT":
                 plan = self.plan_delimiter(ast)
             else:
@@ -271,6 +273,35 @@ class Planner:
             )
         else:
             raise PlanError(f"未知的视图语句类型: {stmt_type}")
+
+    def plan_procedure(self, ast):
+        """生成存储过程操作的执行计划"""
+        stmt_type = ast["type"]
+        
+        if stmt_type in ["CREATE_PROCEDURE", "CREATE_FUNCTION"]:
+            return LogicalPlan(
+                "CreateProcedure",
+                procedure_name=ast.get("procedure", ""),
+                is_function=ast.get("is_function", False),
+                parameters=ast.get("parameters", []),
+                return_type=ast.get("return_type"),
+                body=ast.get("body", [])
+            )
+        elif stmt_type in ["DROP_PROCEDURE", "DROP_FUNCTION"]:
+            return LogicalPlan(
+                "DropProcedure",
+                procedure_name=ast.get("procedure", ""),
+                is_function=ast.get("is_function", False),
+                if_exists=ast.get("if_exists", False)
+            )
+        elif stmt_type == "CALL_PROCEDURE":
+            return LogicalPlan(
+                "CallProcedure",
+                procedure_name=ast.get("procedure", ""),
+                arguments=ast.get("arguments", [])
+            )
+        else:
+            raise PlanError(f"未知的存储过程语句类型: {stmt_type}")
 
     def plan_delimiter(self, ast):
         """生成 DELIMITER 语句的执行计划"""
