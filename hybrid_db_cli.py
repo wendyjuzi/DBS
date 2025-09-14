@@ -14,10 +14,277 @@ from typing import Any, Dict, List, Optional
 proj_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(proj_root))
 
+# 导入prompt_toolkit用于历史记录和自动补全
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.completion.word_completer import WordCompleter
+    from prompt_toolkit.lexers import PygmentsLexer
+    from prompt_toolkit.styles import Style
+    PROMPT_TOOLKIT_AVAILABLE = True
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
+    # 创建占位符类，避免NameError
+    class Completer:
+        def get_completions(self, document, complete_event):
+            return []
+    class Completion:
+        def __init__(self, text, start_position=0, display_meta=""):
+            self.text = text
+            self.start_position = start_position
+            self.display_meta = display_meta
+
 # 导入现有组件
 from src.api.sql_compiler_adapter import SQLCompilerAdapter
 from src.core.hybrid_engine import HybridDatabaseEngine
 from src.utils.exceptions import ExecutionError, SQLSyntaxError
+
+
+class SQLCompleter(Completer):
+    """SQL自动补全器"""
+    
+    def __init__(self, cli_instance):
+        self.cli = cli_instance
+        
+        # SQL关键字
+        self.sql_keywords = [
+            'SELECT', 'FROM', 'WHERE', 'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET',
+            'DELETE', 'CREATE', 'TABLE', 'DROP', 'ALTER', 'INDEX', 'PRIMARY', 'KEY',
+            'FOREIGN', 'REFERENCES', 'UNIQUE', 'NOT', 'NULL', 'DEFAULT', 'AUTO_INCREMENT',
+            'INT', 'STRING', 'DOUBLE', 'VARCHAR', 'TEXT', 'DATETIME', 'DATE', 'TIME',
+            'AND', 'OR', 'IN', 'LIKE', 'BETWEEN', 'IS', 'ORDER', 'BY', 'GROUP', 'HAVING',
+            'LIMIT', 'OFFSET', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'AS',
+            'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'ASC', 'DESC',
+            'BEGIN', 'COMMIT', 'ROLLBACK', 'TRANSACTION', 'AUTOCOMMIT',
+            'EXPLAIN', 'SHOW', 'EXPORT', 'TO', 'PATH', 'CSV', 'JSON'
+        ]
+        
+        # 系统命令
+        self.system_commands = [
+            'help', 'tables', 'clear', 'flush', 'cache', 'flushcache', 
+            'exit', 'MODE', 'ADAPTER', 'CORE', 'SHOW', 'TRANSACTION', 'OVERLAY',
+            'SET', 'ON', 'OFF', 'BEGIN', 'COMMIT', 'ROLLBACK'
+        ]
+        
+        # 操作符和符号
+        self.operators = ['=', '!=', '<', '>', '<=', '>=', '(', ')', ',', ';']
+    
+    def get_completions(self, document, complete_event):
+        """获取补全建议"""
+        word = document.get_word_before_cursor(WORD=True)
+        text_before_cursor = document.text_before_cursor
+        
+        # 获取当前上下文
+        context = self._get_context(text_before_cursor)
+        
+        # 根据上下文提供不同的补全
+        if context == 'keyword':
+            completions = self._get_keyword_completions(word)
+        elif context == 'table':
+            completions = self._get_table_completions(word)
+        elif context == 'column':
+            completions = self._get_column_completions(word, text_before_cursor)
+        elif context == 'system':
+            completions = self._get_system_completions(word)
+        else:
+            # 默认提供所有类型的补全
+            completions = (self._get_keyword_completions(word) + 
+                          self._get_table_completions(word) + 
+                          self._get_system_completions(word))
+        
+        # 去重并排序
+        seen = set()
+        unique_completions = []
+        for completion in sorted(completions, key=lambda x: x.text):
+            if completion.text not in seen:
+                seen.add(completion.text)
+                unique_completions.append(completion)
+        
+        return unique_completions
+    
+    def _get_context(self, text_before_cursor):
+        """分析当前上下文"""
+        text = text_before_cursor.upper().strip()
+        
+        # 系统命令上下文
+        if (text.startswith('HELP') or text.startswith('TABLES') or 
+            text.startswith('CLEAR') or text.startswith('FLUSH') or
+            text.startswith('CACHE') or text.startswith('MODE') or
+            text.startswith('SHOW') or text.startswith('SET')):
+            return 'system'
+        
+        # 表名上下文 (FROM, JOIN, INTO等后面)
+        if any(keyword in text for keyword in ['FROM ', 'JOIN ', 'INTO ', 'UPDATE ', 'TABLE ']):
+            return 'table'
+        
+        # 列名上下文 (SELECT, WHERE, SET等后面)
+        if any(keyword in text for keyword in ['SELECT ', 'WHERE ', 'SET ', 'ORDER BY ', 'GROUP BY ']):
+            return 'column'
+        
+        # 默认关键字上下文
+        return 'keyword'
+    
+    def _get_keyword_completions(self, word):
+        """获取SQL关键字补全"""
+        word_upper = word.upper() if word else ''
+        completions = []
+        
+        for keyword in self.sql_keywords:
+            if keyword.startswith(word_upper):
+                completions.append(Completion(
+                    keyword, 
+                    start_position=-len(word) if word else 0,
+                    display_meta=f"SQL关键字"
+                ))
+        
+        return completions
+    
+    def _get_table_completions(self, word):
+        """获取表名补全"""
+        word_lower = word.lower() if word else ''
+        completions = []
+        
+        try:
+            # 获取当前数据库中的表
+            catalog_info = self.cli.adapter.get_catalog_info()
+            tables = catalog_info.get("tables", [])
+            
+            for table in tables:
+                if table.lower().startswith(word_lower):
+                    completions.append(Completion(
+                        table,
+                        start_position=-len(word) if word else 0,
+                        display_meta=f"表名"
+                    ))
+        except Exception:
+            pass  # 如果获取表信息失败，忽略错误
+        
+        return completions
+    
+    def _get_column_completions(self, word, text_before_cursor):
+        """获取列名补全"""
+        word_lower = word.lower() if word else ''
+        completions = []
+        
+        try:
+            # 尝试从当前SQL中提取表名
+            table_name = self._extract_table_from_sql(text_before_cursor)
+            if table_name:
+                # 获取表的列信息
+                columns = self._get_table_columns(table_name)
+                for column in columns:
+                    if column.lower().startswith(word_lower):
+                        completions.append(Completion(
+                            column,
+                            start_position=-len(word) if word else 0,
+                            display_meta=f"列名 ({table_name})"
+                        ))
+        except Exception:
+            pass  # 如果获取列信息失败，忽略错误
+        
+        return completions
+    
+    def _get_system_completions(self, word):
+        """获取系统命令补全"""
+        word_lower = word.lower() if word else ''
+        completions = []
+        
+        for command in self.system_commands:
+            if command.lower().startswith(word_lower):
+                completions.append(Completion(
+                    command,
+                    start_position=-len(word) if word else 0,
+                    display_meta=f"系统命令"
+                ))
+        
+        return completions
+    
+    def _extract_table_from_sql(self, sql_text):
+        """从SQL文本中提取表名"""
+        sql_upper = sql_text.upper()
+        
+        # 简单的表名提取逻辑
+        patterns = [
+            ('FROM ', ' FROM '),
+            ('JOIN ', ' JOIN '),
+            ('INTO ', ' INTO '),
+            ('UPDATE ', 'UPDATE ')
+        ]
+        
+        for keyword, search_pattern in patterns:
+            if search_pattern in sql_upper:
+                parts = sql_upper.split(search_pattern, 1)
+                if len(parts) > 1:
+                    # 提取表名（到空格或逗号为止）
+                    table_part = parts[1].split()[0].split(',')[0]
+                    return table_part.lower()
+        
+        return None
+    
+    def _get_table_columns(self, table_name):
+        """获取指定表的列名"""
+        try:
+            # 通过执行一个简单的查询来获取列信息
+            result = self.cli.adapter.execute(f"SELECT * FROM {table_name} LIMIT 0")
+            metadata = result.get("metadata", {})
+            return metadata.get("columns", [])
+        except Exception:
+            return []
+
+
+class SimpleHistory:
+    """简单的历史记录管理器（当prompt_toolkit不可用时使用）"""
+    
+    def __init__(self, history_file=None):
+        self.history_file = history_file or os.path.join(os.path.expanduser("~"), ".hybrid_db_history")
+        self.history = []
+        self.current_index = 0
+        self._load_history()
+    
+    def _load_history(self):
+        """加载历史记录"""
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    self.history = [line.strip() for line in f.readlines() if line.strip()]
+                self.current_index = len(self.history)
+        except Exception:
+            pass
+    
+    def append(self, text):
+        """添加命令到历史记录"""
+        if text.strip() and (not self.history or self.history[-1] != text.strip()):
+            self.history.append(text.strip())
+            self.current_index = len(self.history)
+            self._save_history()
+    
+    def _save_history(self):
+        """保存历史记录"""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                for item in self.history[-1000:]:  # 只保存最近1000条
+                    f.write(item + '\n')
+        except Exception:
+            pass
+    
+    def get_previous(self):
+        """获取上一条历史记录"""
+        if self.history and self.current_index > 0:
+            self.current_index -= 1
+            return self.history[self.current_index]
+        return ""
+    
+    def get_next(self):
+        """获取下一条历史记录"""
+        if self.history and self.current_index < len(self.history) - 1:
+            self.current_index += 1
+            return self.history[self.current_index]
+        elif self.history and self.current_index == len(self.history) - 1:
+            self.current_index += 1
+            return ""
+        return ""
 
 
 class HybridDatabaseCLI:
@@ -31,6 +298,10 @@ class HybridDatabaseCLI:
             self.adapter = SQLCompilerAdapter()
             self.core_engine = HybridDatabaseEngine()
             self.mode = "adapter"  # adapter | core
+            
+            # 初始化历史记录和自动补全
+            self._init_history_and_completion()
+            
             print("=== 混合架构数据库系统 (SQL编译器 + C++执行引擎) ===")
             print("支持的命令: CREATE TABLE, INSERT, SELECT, DELETE, UPDATE, DROP TABLE, EXPORT TABLE")
             print("输入 'exit' 退出, 'help' 查看帮助, 'tables' 显示所有表")
@@ -38,13 +309,140 @@ class HybridDatabaseCLI:
             print("输入 'BEGIN' 开启事务, 'COMMIT' 提交, 'ROLLBACK' 回滚")
             print("输入 'SHOW TRANSACTION' 查看事务状态, 'SET AUTOCOMMIT = ON|OFF' 设置自动提交")
             print("输入 'MODE ADAPTER|CORE' 切换执行后端 (当前: adapter)")
-            print("注意: 适配 modules/sql_compiler 的语法限制\n")
+            print("注意: 适配 modules/sql_compiler 的语法限制")
+            
+            # 显示增强功能提示
+            if PROMPT_TOOLKIT_AVAILABLE:
+                print("\n✨ 增强功能已启用:")
+                print("  - 使用 ↑↓ 箭头键浏览历史命令")
+                print("  - 按 Tab 键自动补全 (表名、列名、SQL关键字)")
+                print("  - 历史命令自动建议")
+                print("  - 历史记录保存在 ~/.hybrid_db_history")
+            else:
+                print("\n💡 提示: 安装 prompt_toolkit 获得更好的交互体验")
+                print("   pip install prompt_toolkit")
+            print()
+            
         except Exception as e:
             print(f"数据库初始化失败: {str(e)}")
             print("请确保:")
             print("1. C++模块已编译 (运行 scripts/run_final_demo.ps1)")
             print("2. 所有依赖文件存在")
             sys.exit(1)
+    
+    def _init_history_and_completion(self):
+        """初始化历史记录和自动补全"""
+        self.session = None
+        self.simple_history = None
+        self.prompt_toolkit_available = PROMPT_TOOLKIT_AVAILABLE
+        
+        if PROMPT_TOOLKIT_AVAILABLE:
+            try:
+                # 创建历史记录文件路径
+                history_file = os.path.join(os.path.expanduser("~"), ".hybrid_db_history")
+                
+                # 创建自动补全器
+                completer = SQLCompleter(self)
+                
+                # 创建提示会话
+                self.session = PromptSession(
+                    history=FileHistory(history_file),
+                    completer=completer,
+                    auto_suggest=AutoSuggestFromHistory(),
+                    complete_style='column',  # 补全样式
+                    reserve_space_for_menu=8,  # 为补全菜单保留空间
+                )
+                print("✓ 历史记录和自动补全已启用")
+            except Exception as e:
+                print(f"⚠ 启用增强功能失败: {e}")
+                print("将使用基础模式")
+                self.prompt_toolkit_available = False
+        
+        if not self.prompt_toolkit_available:
+            # 使用简单的历史记录管理器
+            self.simple_history = SimpleHistory()
+            print("✓ 基础历史记录已启用")
+    
+    def _get_input(self, prompt):
+        """获取用户输入，支持历史记录和自动补全"""
+        if self.prompt_toolkit_available and self.session:
+            try:
+                return self.session.prompt(prompt)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"⚠ 输入错误: {e}")
+                return input(prompt)
+        else:
+            # 使用标准input，但支持简单历史记录
+            return self._simple_input(prompt)
+    
+    def _simple_input(self, prompt):
+        """简单的输入方法，支持基础历史记录"""
+        try:
+            import sys
+            
+            # 显示提示符
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            
+            # 读取输入
+            line = ""
+            while True:
+                char = sys.stdin.read(1)
+                if char == '\n':
+                    break
+                elif char == '\r':
+                    continue
+                elif ord(char) == 3:  # Ctrl+C
+                    raise KeyboardInterrupt()
+                elif ord(char) == 4:  # Ctrl+D
+                    raise EOFError()
+                elif ord(char) == 127:  # Backspace
+                    if line:
+                        line = line[:-1]
+                        sys.stdout.write('\b \b')
+                        sys.stdout.flush()
+                elif ord(char) == 27:  # Escape sequence (arrow keys)
+                    next_char = sys.stdin.read(1)
+                    if next_char == '[':
+                        arrow = sys.stdin.read(1)
+                        if arrow == 'A':  # Up arrow
+                            history_line = self.simple_history.get_previous()
+                            if history_line:
+                                # 清除当前行
+                                sys.stdout.write('\r' + ' ' * (len(prompt) + len(line)) + '\r')
+                                sys.stdout.write(prompt)
+                                line = history_line
+                                sys.stdout.write(line)
+                                sys.stdout.flush()
+                        elif arrow == 'B':  # Down arrow
+                            history_line = self.simple_history.get_next()
+                            # 清除当前行
+                            sys.stdout.write('\r' + ' ' * (len(prompt) + len(line)) + '\r')
+                            sys.stdout.write(prompt)
+                            line = history_line
+                            sys.stdout.write(line)
+                            sys.stdout.flush()
+                else:
+                    line += char
+                    sys.stdout.write(char)
+                    sys.stdout.flush()
+            
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+            
+            # 添加到历史记录
+            if line.strip():
+                self.simple_history.append(line)
+            
+            return line
+            
+        except (KeyboardInterrupt, EOFError):
+            raise
+        except Exception:
+            # 如果出错，回退到标准input
+            return input(prompt)
 
     def start(self):
         """启动命令行交互"""
@@ -55,7 +453,8 @@ class HybridDatabaseCLI:
                 # 支持多行SQL输入
                 sql_lines = []
                 while True:
-                    line = input("db> " if not sql_lines else "  > ").strip()
+                    # 使用增强的输入方法
+                    line = self._get_input("db> " if not sql_lines else "  > ").strip()
 
                     # 检查是否是导出命令
                     if line.upper().startswith("EXPORT TABLE"):
@@ -137,6 +536,17 @@ class HybridDatabaseCLI:
         """执行SQL语句"""
         if not sql.strip():
             return
+        
+        # 将SQL添加到历史记录（如果不是系统命令）
+        if not sql.strip().lower() in ['help', 'tables', 'clear', 'flush', 'cache', 'flushcache', 'exit']:
+            if self.prompt_toolkit_available and self.session:
+                try:
+                    # prompt_toolkit会自动处理历史记录
+                    pass
+                except Exception:
+                    pass
+            elif self.simple_history:
+                self.simple_history.append(sql)
         
         print(f"执行: {sql}")
         print("-" * 60)
@@ -264,6 +674,11 @@ class HybridDatabaseCLI:
         """显示帮助信息"""
         help_text = """
 📖 混合架构数据库系统帮助
+
+✨ 增强功能:
+  ↑↓ 箭头键  - 浏览历史命令
+  Tab 键     - 自动补全 (表名、列名、SQL关键字)
+  历史记录   - 自动保存到 ~/.hybrid_db_history
 
 🔧 系统命令:
   help       - 显示此帮助信息
