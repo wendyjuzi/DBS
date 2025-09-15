@@ -124,6 +124,9 @@ class DatabaseGUI:
         self.sql_text = scrolledtext.ScrolledText(input_frame, height=8,
                                                   font=("Consolas", 10))
         self.sql_text.pack(fill=tk.BOTH, expand=True, pady=(5, 10))
+        
+        # 绑定自动补全事件
+        self.setup_autocomplete()
 
         # 预设SQL示例
         sample_sql = """-- SQL示例 (点击执行按钮运行)
@@ -918,6 +921,375 @@ CreateTableStatement
         else:
             self.plan_result.insert(tk.END, "✅ 执行计划生成成功!\n")
             self.plan_result.insert(tk.END, "执行计划: 直接执行操作\n")
+
+    def setup_autocomplete(self):
+        """设置自动补全功能"""
+        # 绑定按键事件
+        self.sql_text.bind('<KeyRelease>', self.on_key_release)
+        self.sql_text.bind('<Control-space>', self.show_autocomplete)
+        
+        # 创建补全弹窗（初始隐藏）
+        self.autocomplete_window = None
+        self.autocomplete_listbox = None
+        
+        # 定义关键字和数据类型
+        self.sql_keywords = [
+            'SELECT', 'FROM', 'WHERE', 'INSERT', 'CREATE', 'TABLE', 'UPDATE', 'DELETE', 
+            'INTO', 'VALUES', 'DROP', 'ALTER', 'INDEX', 'VIEW', 'TRIGGER', 'PROCEDURE',
+            'BEGIN', 'COMMIT', 'ROLLBACK', 'TRANSACTION', 'AND', 'OR', 'NOT', 'NULL',
+            'PRIMARY', 'KEY', 'FOREIGN', 'REFERENCES', 'UNIQUE', 'DEFAULT', 'CHECK',
+            'ORDER', 'BY', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'DISTINCT', 'AS',
+            'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'ON', 'USING',
+            'UNION', 'INTERSECT', 'EXCEPT', 'EXISTS', 'IN', 'BETWEEN', 'LIKE',
+            'IS', 'ASC', 'DESC', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
+            'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IF', 'ELSEIF', 'ENDIF'
+        ]
+        
+        self.data_types = [
+            'INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT',
+            'FLOAT', 'DOUBLE', 'DECIMAL', 'NUMERIC', 'REAL',
+            'CHAR', 'VARCHAR', 'TEXT', 'STRING', 'LONGTEXT',
+            'DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'YEAR',
+            'BOOLEAN', 'BOOL', 'BINARY', 'VARBINARY', 'BLOB'
+        ]
+
+    def on_key_release(self, event):
+        """按键释放事件处理"""
+        # 实时语法检查
+        self.check_syntax_realtime()
+        
+        # 获取当前光标位置的单词
+        current_word = self.get_current_word()
+        
+        # 如果单词长度大于1且不是特殊字符，显示补全
+        if len(current_word) > 1 and current_word.isalnum():
+            self.show_autocomplete_suggestions(current_word)
+        else:
+            self.hide_autocomplete()
+
+    def check_syntax_realtime(self):
+        """实时语法检查"""
+        try:
+            sql_text = self.sql_text.get(1.0, tk.END).strip()
+            if not sql_text or sql_text.startswith('--'):
+                return
+                
+            # 清除之前的语法高亮
+            self.clear_syntax_highlighting()
+            
+            # 应用语法高亮
+            self.apply_syntax_highlighting()
+            
+            # 检查常见语法错误
+            self.check_common_syntax_errors(sql_text)
+            
+        except Exception as e:
+            print(f"实时语法检查失败: {e}")
+
+    def clear_syntax_highlighting(self):
+        """清除语法高亮"""
+        for tag in ['keyword', 'string', 'number', 'comment', 'error']:
+            self.sql_text.tag_delete(tag)
+
+    def apply_syntax_highlighting(self):
+        """应用语法高亮"""
+        sql_text = self.sql_text.get(1.0, tk.END)
+        
+        # 配置标签样式
+        self.sql_text.tag_configure('keyword', foreground='blue', font=('Consolas', 10, 'bold'))
+        self.sql_text.tag_configure('string', foreground='green')
+        self.sql_text.tag_configure('number', foreground='purple')
+        self.sql_text.tag_configure('comment', foreground='gray', font=('Consolas', 10, 'italic'))
+        self.sql_text.tag_configure('error', background='#ffcccc', foreground='red')
+        
+        import re
+        
+        # 关键字高亮
+        for keyword in self.sql_keywords:
+            pattern = r'\b' + re.escape(keyword) + r'\b'
+            for match in re.finditer(pattern, sql_text, re.IGNORECASE):
+                start_idx = f"1.0+{match.start()}c"
+                end_idx = f"1.0+{match.end()}c"
+                self.sql_text.tag_add('keyword', start_idx, end_idx)
+        
+        # 字符串高亮
+        string_pattern = r"'[^']*'"
+        for match in re.finditer(string_pattern, sql_text):
+            start_idx = f"1.0+{match.start()}c"
+            end_idx = f"1.0+{match.end()}c"
+            self.sql_text.tag_add('string', start_idx, end_idx)
+        
+        # 数字高亮
+        number_pattern = r'\b\d+\.?\d*\b'
+        for match in re.finditer(number_pattern, sql_text):
+            start_idx = f"1.0+{match.start()}c"
+            end_idx = f"1.0+{match.end()}c"
+            self.sql_text.tag_add('number', start_idx, end_idx)
+        
+        # 注释高亮
+        comment_pattern = r'--.*$'
+        for match in re.finditer(comment_pattern, sql_text, re.MULTILINE):
+            start_idx = f"1.0+{match.start()}c"
+            end_idx = f"1.0+{match.end()}c"
+            self.sql_text.tag_add('comment', start_idx, end_idx)
+
+    def check_common_syntax_errors(self, sql_text):
+        """检查常见语法错误"""
+        import re
+        
+        # 检查未闭合的引号
+        single_quotes = sql_text.count("'")
+        if single_quotes % 2 != 0:
+            self.highlight_error("未闭合的单引号")
+        
+        # 检查括号匹配
+        open_parens = sql_text.count('(')
+        close_parens = sql_text.count(')')
+        if open_parens != close_parens:
+            self.highlight_error("括号不匹配")
+        
+        # 检查SELECT语句是否有FROM子句（排除子查询）
+        select_matches = re.findall(r'\bSELECT\b.*?(?=\bSELECT\b|$)', sql_text, re.IGNORECASE | re.DOTALL)
+        for select_stmt in select_matches:
+            if 'FROM' not in select_stmt.upper() and '*' in select_stmt:
+                continue  # 可能是SELECT常量
+            elif 'FROM' not in select_stmt.upper():
+                self.highlight_error("SELECT语句缺少FROM子句")
+        
+        # 检查INSERT语句格式
+        if re.search(r'\bINSERT\s+INTO\b', sql_text, re.IGNORECASE):
+            if not re.search(r'\bVALUES\b', sql_text, re.IGNORECASE):
+                self.highlight_error("INSERT语句缺少VALUES子句")
+
+    def highlight_error(self, error_msg):
+        """高亮显示错误"""
+        # 在状态栏显示错误信息
+        if hasattr(self, 'status_compiler'):
+            self.status_compiler.config(text=f"⚠️ 语法提示: {error_msg}", foreground='orange')
+
+    def show_autocomplete(self, event=None):
+        """显示自动补全（Ctrl+Space）"""
+        current_word = self.get_current_word()
+        self.show_autocomplete_suggestions(current_word)
+        return "break"
+
+    def get_current_word(self):
+        """获取光标位置的当前单词"""
+        cursor_pos = self.sql_text.index(tk.INSERT)
+        line_start = cursor_pos.split('.')[0] + '.0'
+        line_end = cursor_pos.split('.')[0] + '.end'
+        line_text = self.sql_text.get(line_start, line_end)
+        
+        col = int(cursor_pos.split('.')[1])
+        
+        # 找到单词边界
+        start = col
+        while start > 0 and (line_text[start-1].isalnum() or line_text[start-1] == '_'):
+            start -= 1
+        
+        end = col
+        while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == '_'):
+            end += 1
+            
+        return line_text[start:end]
+
+    def show_autocomplete_suggestions(self, current_word):
+        """显示自动补全建议"""
+        if not current_word:
+            return
+            
+        # 获取匹配的建议
+        suggestions = self.get_suggestions(current_word)
+        
+        if not suggestions:
+            self.hide_autocomplete()
+            return
+            
+        # 创建或更新补全窗口
+        if self.autocomplete_window is None:
+            self.create_autocomplete_window()
+            
+        # 更新建议列表
+        self.autocomplete_listbox.delete(0, tk.END)
+        for suggestion in suggestions[:10]:  # 最多显示10个建议
+            self.autocomplete_listbox.insert(tk.END, suggestion)
+            
+        # 定位窗口位置
+        self.position_autocomplete_window()
+        
+        # 显示窗口
+        self.autocomplete_window.deiconify()
+
+    def get_suggestions(self, current_word):
+        """获取补全建议"""
+        word_upper = current_word.upper()
+        suggestions = []
+        
+        # 关键字匹配
+        for keyword in self.sql_keywords:
+            if keyword.startswith(word_upper):
+                suggestions.append(keyword)
+                
+        # 数据类型匹配
+        for dtype in self.data_types:
+            if dtype.startswith(word_upper):
+                suggestions.append(dtype)
+                
+        # 表名匹配（如果有的话）
+        table_names = self.get_available_tables()
+        for table in table_names:
+            if table.upper().startswith(word_upper):
+                suggestions.append(table)
+                
+        # 列名匹配（基于上下文）
+        column_names = self.get_available_columns()
+        for column in column_names:
+            if column.upper().startswith(word_upper):
+                suggestions.append(column)
+        
+        return sorted(list(set(suggestions)))  # 去重并排序
+
+    def get_available_tables(self):
+        """获取可用的表名"""
+        try:
+            if self.adapter and BACKEND_AVAILABLE:
+                # 尝试从数据库系统获取实际的表名
+                result = self.adapter.execute("SHOW TABLES;")
+                if result.get('status') == 'success':
+                    tables = []
+                    for row in result.get('data', []):
+                        if isinstance(row, dict) and 'table_name' in row:
+                            tables.append(row['table_name'])
+                        elif isinstance(row, list) and row:
+                            tables.append(str(row[0]))
+                    return tables
+        except Exception as e:
+            print(f"获取表名失败: {e}")
+        
+        # 返回示例表名作为后备
+        return ['students', 'teachers', 'courses', 'enrollment', 'users', 'orders', 'products']
+
+    def get_available_columns(self):
+        """获取可用的列名（基于上下文分析）"""
+        # 分析当前SQL文本，找到可能的表名
+        sql_text = self.sql_text.get(1.0, tk.END).upper()
+        current_tables = []
+        
+        # 简单解析FROM子句中的表名
+        import re
+        from_matches = re.findall(r'FROM\s+(\w+)', sql_text)
+        current_tables.extend(from_matches)
+        
+        # 解析JOIN子句中的表名
+        join_matches = re.findall(r'JOIN\s+(\w+)', sql_text)
+        current_tables.extend(join_matches)
+        
+        # 解析INSERT INTO中的表名
+        insert_matches = re.findall(r'INSERT\s+INTO\s+(\w+)', sql_text)
+        current_tables.extend(insert_matches)
+        
+        # 解析UPDATE中的表名
+        update_matches = re.findall(r'UPDATE\s+(\w+)', sql_text)
+        current_tables.extend(update_matches)
+        
+        columns = []
+        
+        # 尝试从数据库系统获取这些表的列信息
+        try:
+            if self.adapter and BACKEND_AVAILABLE and current_tables:
+                for table in set(current_tables):  # 去重
+                    try:
+                        # 这里可以实现获取表结构的逻辑
+                        # 暂时使用基于表名的常见列名推测
+                        if table.lower() == 'students':
+                            columns.extend(['id', 'name', 'age', 'score', 'grade', 'email'])
+                        elif table.lower() == 'teachers':
+                            columns.extend(['id', 'name', 'department', 'salary', 'hire_date'])
+                        elif table.lower() == 'courses':
+                            columns.extend(['id', 'name', 'credits', 'department', 'description'])
+                        else:
+                            # 通用列名
+                            columns.extend(['id', 'name', 'created_at', 'updated_at'])
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"获取列名失败: {e}")
+        
+        # 添加常见的通用列名
+        common_columns = ['id', 'name', 'age', 'score', 'email', 'phone', 'address', 
+                         'created_at', 'updated_at', 'status', 'type', 'value', 'count',
+                         'description', 'title', 'content', 'category', 'date', 'time']
+        columns.extend(common_columns)
+        
+        return sorted(list(set(columns)))  # 去重并排序
+
+    def create_autocomplete_window(self):
+        """创建自动补全窗口"""
+        self.autocomplete_window = tk.Toplevel(self.root)
+        self.autocomplete_window.withdraw()  # 初始隐藏
+        self.autocomplete_window.wm_overrideredirect(True)
+        self.autocomplete_window.configure(bg='white', relief='solid', bd=1)
+        
+        # 创建列表框
+        self.autocomplete_listbox = tk.Listbox(
+            self.autocomplete_window,
+            height=6,
+            font=("Consolas", 9),
+            selectmode=tk.SINGLE,
+            bg='white',
+            fg='black',
+            selectbackground='#0078d4',
+            selectforeground='white',
+            bd=0,
+            highlightthickness=0
+        )
+        self.autocomplete_listbox.pack()
+        
+        # 绑定事件
+        self.autocomplete_listbox.bind('<Double-Button-1>', self.insert_suggestion)
+        self.autocomplete_listbox.bind('<Return>', self.insert_suggestion)
+        self.sql_text.bind('<Escape>', lambda e: self.hide_autocomplete())
+        self.sql_text.bind('<Button-1>', lambda e: self.hide_autocomplete())
+
+    def position_autocomplete_window(self):
+        """定位自动补全窗口"""
+        # 获取光标位置
+        cursor_pos = self.sql_text.index(tk.INSERT)
+        bbox = self.sql_text.bbox(cursor_pos)
+        
+        if bbox:
+            x = bbox[0] + self.sql_text.winfo_rootx()
+            y = bbox[1] + bbox[3] + self.sql_text.winfo_rooty()
+            self.autocomplete_window.geometry(f"+{x}+{y}")
+
+    def insert_suggestion(self, event=None):
+        """插入选中的建议"""
+        selection = self.autocomplete_listbox.curselection()
+        if selection:
+            suggestion = self.autocomplete_listbox.get(selection[0])
+            
+            # 获取当前单词的位置
+            cursor_pos = self.sql_text.index(tk.INSERT)
+            current_word = self.get_current_word()
+            
+            # 计算替换位置
+            line, col = cursor_pos.split('.')
+            col = int(col)
+            start_col = col - len(current_word)
+            
+            start_pos = f"{line}.{start_col}"
+            end_pos = f"{line}.{col}"
+            
+            # 替换文本
+            self.sql_text.delete(start_pos, end_pos)
+            self.sql_text.insert(start_pos, suggestion)
+            
+            self.hide_autocomplete()
+
+    def hide_autocomplete(self):
+        """隐藏自动补全窗口"""
+        if self.autocomplete_window:
+            self.autocomplete_window.withdraw()
 
     def classify_token(self, word: str) -> str:
         """分类token"""
