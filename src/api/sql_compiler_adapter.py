@@ -93,6 +93,8 @@ class SQLCompilerAdapter:
         self._mat_views: Dict[str, Dict[str, str]] = {}
         # 存储过程：name -> {statements: [sql]}
         self._procedures: Dict[str, Dict[str, Any]] = {}
+        # 是否启用适配器侧 WHERE 快速通道（默认关闭，改用编译器目录解析）
+        self._enable_adapter_where_shortcuts: bool = False
     
     def _convert_plan_to_executor_format(self, compiler_plan) -> Dict[str, Any]:
         """
@@ -286,15 +288,11 @@ class SQLCompilerAdapter:
             return self._handle_drop_materialized_view(sql)
         if upper_sql.startswith("REFRESH MATERIALIZED VIEW "):
             return self._handle_refresh_materialized_view(sql)
-        # 简易 WHERE 直通（不改编译器）：
-        # 基础：AND 以及 =, >, >=, <, <=, LIKE
-        # 扩展：OR、括号优先级、IN、BETWEEN（复杂表达式改为适配器侧过滤）
-        if upper_sql.startswith("SELECT ") and " WHERE " in upper_sql:
-            # 先尝试复杂表达式解析（支持 OR/括号/IN/BETWEEN）
+        # WHERE 解析交由编译器目录处理；若显式开启快捷通道则使用适配器侧解析
+        if self._enable_adapter_where_shortcuts and upper_sql.startswith("SELECT ") and " WHERE " in upper_sql:
             advanced = self._try_execute_select_with_advanced_where(sql)
             if advanced is not None:
                 return advanced
-            # 回退到简单 AND 直通
             simple = self._try_execute_simple_select_with_where(sql)
             if simple is not None:
                 return simple
@@ -395,7 +393,23 @@ class SQLCompilerAdapter:
             print(f"[ADAPTER] 编译器计划生成成功，生成 {len(compiler_plans)} 个计划")
             
             # EXPLAIN: 仅做计划转换和路径选择，返回解释信息
-            if sql.upper().startswith("EXPLAIN "):
+            up_explain = sql.upper()
+            if up_explain.startswith("EXPLAIN DETAIL "):
+                # 返回编译产物（不执行）
+                inner_sql = sql[len("EXPLAIN DETAIL "):].strip()
+                artifacts = self.get_compile_artifacts(inner_sql)
+                # 简单地以 JSON 字符串形式返回主要字段，便于查看
+                import json
+                data = [[
+                    json.dumps(artifacts.get("tokens", []), ensure_ascii=False),
+                    json.dumps(artifacts.get("asts", []), ensure_ascii=False),
+                    json.dumps(artifacts.get("logical_plans", []), ensure_ascii=False),
+                    json.dumps(artifacts.get("optimized_plans", []), ensure_ascii=False),
+                    json.dumps(artifacts.get("executor_plans", []), ensure_ascii=False),
+                    json.dumps(artifacts.get("explains", []), ensure_ascii=False),
+                ]]
+                return {"affected_rows": 0, "data": data, "metadata": {"columns": ["tokens","asts","logical_plans","optimized_plans","executor_plans","explains"]}}
+            if up_explain.startswith("EXPLAIN "):
                 results = []
                 for compiler_plan in compiler_plans:
                     executor_plan = self._convert_plan_to_executor_format(compiler_plan)
@@ -1616,6 +1630,41 @@ class SQLCompilerAdapter:
                                 # 使用批量主键回表
                                 target_columns = executor_plan.get("columns", ["*"])
                                 return self.hybrid_executor.select_by_pk_values(table, target_columns, pk_values)
+                # 多条件优化：对多个已建立二级索引的条件进行主键集合求交
+                if table and len(flt) >= 2:
+                    try:
+                        pk_sets = []
+                        for cond in flt:
+                            col = cond.get("column", "")
+                            op = cond.get("op")
+                            val = cond.get("value")
+                            if not self.index_manager.has_index(table, col):
+                                continue
+                            if op == "=":
+                                s = set(self.index_manager.lookup_pks(table, col, str(val)))
+                            elif op in (">", ">=", "<", "<="):
+                                min_val = None; max_val = None; inc_min = True; inc_max = True
+                                if op in (">", ">="):
+                                    min_val = val; inc_min = (op == ">=")
+                                else:
+                                    max_val = val; inc_max = (op == "<=")
+                                s = set(self.index_manager.range_lookup_pks(table, col, min_val, max_val, inc_min, inc_max))
+                            else:
+                                # LIKE/IN 等暂不使用二级索引
+                                continue
+                            if s:
+                                pk_sets.append(s)
+                        if pk_sets:
+                            inter = pk_sets[0]
+                            for s in pk_sets[1:]:
+                                inter = inter.intersection(s)
+                                if not inter:
+                                    break
+                            if inter:
+                                target_columns = executor_plan.get("columns", ["*"])
+                                return self.hybrid_executor.select_by_pk_values(table, target_columns, list(inter))
+                    except Exception:
+                        pass
                 # 复合条件优化（雏形）：等值(c1) + 范围(c2) → 复合键范围
                 if table and len(flt) >= 2:
                     # 找到一个等值和一个范围条件
@@ -1684,6 +1733,65 @@ class SQLCompilerAdapter:
             return res
         except Exception as e:
             raise ExecutionError(f"索引优化执行失败: {e}")
+    
+    def get_compile_artifacts(self, sql: str) -> Dict[str, Any]:
+        """仅编译不执行，收集 tokens/AST/逻辑计划/优化计划/执行器计划 与路径说明。"""
+        s = sql.strip()
+        up = s.upper().rstrip(';')
+        if up.startswith("CREATE TABLE "):
+            s = self._preprocess_create_table_constraints(s)
+        # 词法
+        sql_for_compile = self._uppercase_outside_quotes(s)
+        lexer = Lexer(sql_for_compile)
+        tokens, errors = lexer.tokenize()
+        if errors:
+            raise SQLSyntaxError(f"词法分析错误: {errors[0]}")
+        tokens_str = [str(t) for t in tokens]
+        # 语法
+        parser = Parser(tokens)
+        ast_list = parser.parse()
+        ast_dicts = [a.to_dict() for a in ast_list]
+        # 语义
+        for ast in ast_list:
+            self.semantic_analyzer.analyze(ast)
+        # 逻辑计划
+        planner = Planner(ast_dicts, enable_optimization=True)
+        logical_plans = planner.generate_plan()
+        logical_plan_dicts = []
+        for lp in logical_plans:
+            try:
+                logical_plan_dicts.append(lp.to_dict())
+            except Exception:
+                logical_plan_dicts.append({"type": getattr(lp, "type", "Unknown")})
+        # 优化
+        optimized_plans = []
+        for lp in logical_plans:
+            try:
+                optimized_plans.append(self.compiler_optimizer.optimize(lp))
+            except Exception:
+                optimized_plans.append(lp)
+        optimized_plan_dicts = []
+        for op in optimized_plans:
+            try:
+                optimized_plan_dicts.append(op.to_dict())
+            except Exception:
+                optimized_plan_dicts.append({"type": getattr(op, "type", "Unknown")})
+        # 执行器计划 + 路径说明
+        executor_plans = []
+        explains = []
+        for op in optimized_plans:
+            ex = self._convert_plan_to_executor_format(op)
+            chosen = self._choose_path(ex)
+            executor_plans.append(chosen)
+            explains.append(chosen.get("_explain", {}))
+        return {
+            "tokens": tokens_str,
+            "asts": ast_dicts,
+            "logical_plans": logical_plan_dicts,
+            "optimized_plans": optimized_plan_dicts,
+            "executor_plans": executor_plans,
+            "explains": explains,
+        }
     
     def flush(self):
         """刷盘所有脏页"""
