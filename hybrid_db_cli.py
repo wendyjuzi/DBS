@@ -706,6 +706,7 @@ class HybridDatabaseCLI:
   CREATE INDEX idx ON table(col) PK pkcol;  - 创建二级索引
   DROP INDEX table(col);                     - 删除索引
   SHOW INDEXES                               - 查看所有索引
+  SHOW TRIGGERS                              - 查看所有触发器
   exit       - 退出程序
 
 📝 SQL语句支持:
@@ -721,8 +722,35 @@ class HybridDatabaseCLI:
   EXPORT TABLE table_name TO format PATH 'file_path'     - 导出数据
   IMPORT TABLE table_name FROM format PATH 'file_path'   - 从文件导入数据
 
+📚 视图/物化视图/触发器/过程:
+  -- 视图（非物化）：
+  CREATE VIEW v AS SELECT col1, col2 FROM t;
+  SELECT * FROM v;               -- 支持 * 与指定列
+  DROP VIEW v;
+
+  -- 物化视图（以物理表存储，需刷新）：
+  CREATE MATERIALIZED VIEW mv AS SELECT col1 FROM t;
+  REFRESH MATERIALIZED VIEW mv;  -- 全量刷新
+  DROP MATERIALIZED VIEW mv;
+
+  -- 触发器（行级 BEFORE/AFTER INSERT/UPDATE/DELETE）：
+  CREATE TRIGGER trg BEFORE INSERT ON t AS BEGIN
+    -- 这里写多条语句，每条以分号结束
+    INSERT INTO audit(id) VALUES (1);
+  END;
+  SHOW TRIGGERS;
+  DROP TRIGGER trg ON t;
+
+  -- 存储过程（适配器内解释执行）：
+  CREATE PROCEDURE p AS BEGIN
+    INSERT INTO t(id,name) VALUES (10,'x');
+  END;
+  CALL p;
+  DROP PROCEDURE p;
+
 🔎 索引命令:
   CREATE INDEX idx ON table(col) PK pkcol;               - 创建单列二级索引
+  CREATE INDEX idx ON table(col) USING HASH PK pkcol;    - 指定索引策略(HASH/BTREE)
   CREATE COMPOSITE INDEX idx ON table(col1,col2);        - 创建复合索引（内存雏形）
   DROP INDEX table(col);                                 - 删除索引
   DROP COMPOSITE INDEX ON table;                         - 删除复合索引
