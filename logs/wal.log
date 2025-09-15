@@ -313,3 +313,39 @@
 {"txid": "9197df9f-d02f-498d-a9ae-367bf9b81550", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "9197df9f-d02f-498d-a9ae-367bf9b81550", "op": "INSERT", "table": "t_core_38a67b6e", "payload": {"values": ["1", "A"]}}
 {"txid": "9197df9f-d02f-498d-a9ae-367bf9b81550", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c11ced4a-b50a-49be-b0d6-eeca7bcd6886", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c11ced4a-b50a-49be-b0d6-eeca7bcd6886", "op": "INSERT", "table": "T_AB_DA175A00", "payload": {"values": ["1", "A"]}}
+{"txid": "c11ced4a-b50a-49be-b0d6-eeca7bcd6886", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "11f6de0c-db2a-47d3-a084-ea8b806d0a8a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "11f6de0c-db2a-47d3-a084-ea8b806d0a8a", "op": "INSERT", "table": "T_AB_DA175A00", "payload": {"values": ["2", "B"]}}
+{"txid": "11f6de0c-db2a-47d3-a084-ea8b806d0a8a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "299c40f6-476d-45f8-a633-a3c8d182eba9", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "299c40f6-476d-45f8-a633-a3c8d182eba9", "op": "INSERT", "table": "T_VB_F5C59C31", "payload": {"values": ["1", "A"]}}
+{"txid": "299c40f6-476d-45f8-a633-a3c8d182eba9", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "eab906ee-80ae-4ced-943c-4bd5661b313b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "eab906ee-80ae-4ced-943c-4bd5661b313b", "op": "INSERT", "table": "T_VB_F5C59C31", "payload": {"values": ["2", "B"]}}
+{"txid": "eab906ee-80ae-4ced-943c-4bd5661b313b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "51f83678-e448-47cc-a126-f9bc0517c1d6", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "51f83678-e448-47cc-a126-f9bc0517c1d6", "op": "INSERT", "table": "T_MV_7607F708", "payload": {"values": ["1", "A"]}}
+{"txid": "51f83678-e448-47cc-a126-f9bc0517c1d6", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c8e2082c-c8ef-443e-8fe4-a8b31d3d3861", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c8e2082c-c8ef-443e-8fe4-a8b31d3d3861", "op": "INSERT", "table": "__MAT_MV_MV_E330DA32", "payload": {"values": ["1", "A"]}}
+{"txid": "c8e2082c-c8ef-443e-8fe4-a8b31d3d3861", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "719b1e63-75a4-4200-8936-bf752b99f595", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "719b1e63-75a4-4200-8936-bf752b99f595", "op": "INSERT", "table": "__MAT_MV_MV_E330DA32", "payload": {"values": ["1", "A"]}}
+{"txid": "719b1e63-75a4-4200-8936-bf752b99f595", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "14c18ded-d661-4416-9990-09b3dfdb1a5a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "14c18ded-d661-4416-9990-09b3dfdb1a5a", "op": "INSERT", "table": "T_PR_9A690D3D", "payload": {"values": ["1", "A"]}}
+{"txid": "14c18ded-d661-4416-9990-09b3dfdb1a5a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "db5792e5-210d-4d4e-a31d-e34d1b95174e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "db5792e5-210d-4d4e-a31d-e34d1b95174e", "op": "INSERT", "table": "T_IO_71ED1E92", "payload": {"values": ["1", "A"]}}
+{"txid": "db5792e5-210d-4d4e-a31d-e34d1b95174e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "f98bc85d-21da-47e6-9ab5-cb1957e0ab61", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "f98bc85d-21da-47e6-9ab5-cb1957e0ab61", "op": "INSERT", "table": "T_IO2_B4D6FD5F", "payload": {"values": ["1", "A"]}}
+{"txid": "f98bc85d-21da-47e6-9ab5-cb1957e0ab61", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ab15a04b-7938-436c-bb17-b5ac5fd4b694", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ab15a04b-7938-436c-bb17-b5ac5fd4b694", "op": "INSERT", "table": "t_core_b47b9454", "payload": {"values": ["1", "A"]}}
+{"txid": "ab15a04b-7938-436c-bb17-b5ac5fd4b694", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "82c02be6-49b7-47e9-af68-3424460bbc15", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "82c02be6-49b7-47e9-af68-3424460bbc15", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "85.5"]}}
+{"txid": "82c02be6-49b7-47e9-af68-3424460bbc15", "op": "COMMIT", "table": null, "payload": {}}
