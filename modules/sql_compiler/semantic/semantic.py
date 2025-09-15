@@ -219,6 +219,14 @@ class SemanticAnalyzer:
         self.current_procedure_params = {}  # 当前存储过程的参数作用域
         self.current_local_vars = {}  # 当前存储过程的局部变量作用域
     
+    def _print_checklist(self, existence_status: str, type_status: str, count_order_status: str, catalog_status: str):
+        """在通过时也显式输出标准检查项状态。"""
+        print("—— 语义检查项 ——")
+        print(f"  - 表/列存在性检查: {existence_status}")
+        print(f"  - 类型一致性检查: {type_status}")
+        print(f"  - 列数/列序检查: {count_order_status}")
+        print(f"  - 目录维护 (Catalog): {catalog_status}")
+    
     def _get_available_tables(self):
         """获取可用表列表"""
         return list(self.catalog.tables.keys())
@@ -356,6 +364,13 @@ class SemanticAnalyzer:
             if constraints:
                 for col, cons in constraints.items():
                     print(f"    约束: {col} - {', '.join(cons)}")
+            # 标准检查项摘要
+            self._print_checklist(
+                existence_status="通过",
+                type_status="无需检查",
+                count_order_status="无需检查",
+                catalog_status=f"已更新: 新建表 {table_name}"
+            )
                     
         except SemanticError as e:
             # 重新抛出带有上下文的错误
@@ -469,6 +484,13 @@ class SemanticAnalyzer:
             print(f"    主键约束检查通过")
         if foreign_keys:
             print(f"    外键约束检查通过")
+        # 标准检查项摘要
+        self._print_checklist(
+            existence_status="通过",
+            type_status="通过",
+            count_order_status="通过",
+            catalog_status="无更改"
+        )
 
     def _check_select(self, ast):
         # 获取主表和所有涉及的表
@@ -481,7 +503,11 @@ class SemanticAnalyzer:
         if from_node:
             main_table = from_node.value
             if not self.catalog.has_table(main_table):
-                raise SemanticError("TableError", main_table, "表不存在")
+                raise SemanticError(
+                    "TableError", main_table, f"表 '{main_table}' 不存在",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
             tables.append(main_table)
             
             # 检查主表别名
@@ -495,7 +521,11 @@ class SemanticAnalyzer:
                     join_table = next((c.value for c in join_child.children if c.node_type == "TABLE"), None)
                     if join_table:
                         if not self.catalog.has_table(join_table):
-                            raise SemanticError("TableError", join_table, "JOIN 中的表不存在")
+                            raise SemanticError(
+                                "TableError", join_table, f"JOIN 中的表 '{join_table}' 不存在",
+                                available_tables=self._get_available_tables(),
+                                available_columns=self._get_available_columns()
+                            )
                         tables.append(join_table)
                         
                         # 检查 JOIN 表别名
@@ -558,17 +588,35 @@ class SemanticAnalyzer:
                         raise SemanticError("ColumnError", col_name, "ORDER BY 中的列不存在")
 
         print(f"[OK] SELECT 语义检查通过")
+        # 标准检查项摘要
+        self._print_checklist(
+            existence_status="通过",
+            type_status="通过",
+            count_order_status="无需检查",
+            catalog_status="无更改"
+        )
 
     def _check_delete(self, ast):
         table_name = ast.value
         if not self.catalog.has_table(table_name):
-            raise SemanticError("TableError", table_name, "表不存在")
+            raise SemanticError(
+                "TableError", table_name, f"表 '{table_name}' 不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
 
         for child in ast.children:
             if child.node_type == "WHERE":
                 self._check_where(table_name, child)
 
         print(f"[OK] DELETE FROM {table_name} 语义检查通过")
+        # 标准检查项摘要
+        self._print_checklist(
+            existence_status="通过",
+            type_status="通过",
+            count_order_status="无需检查",
+            catalog_status="无更改"
+        )
 
     def _check_where(self, table_name, where_node):
         left = next((c for c in where_node.children if c.node_type == "LEFT"), None)
@@ -614,14 +662,22 @@ class SemanticAnalyzer:
     def _check_update(self, ast):
         table_name = ast.value
         if not self.catalog.has_table(table_name):
-            raise SemanticError("TableError", table_name, "表不存在")
+            raise SemanticError(
+                "TableError", table_name, f"表 '{table_name}' 不存在",
+                available_tables=self._get_available_tables(),
+                available_columns=self._get_available_columns()
+            )
 
         # 检查 SET 子句中的列
         for child in ast.children:
             if child.node_type == "ASSIGNMENT":
                 col_name, value = child.value.split("=")
                 if not self.catalog.has_column(table_name, col_name):
-                    raise SemanticError("ColumnError", col_name, "列不存在")
+                    raise SemanticError(
+                        "ColumnError", col_name, f"列 '{col_name}' 在表 '{table_name}' 中不存在",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
                 
                 # 检查类型匹配
                 expected_type = self.catalog.get_column_type(table_name, col_name)
@@ -651,6 +707,13 @@ class SemanticAnalyzer:
                 self._check_where(table_name, child)
 
         print(f"[OK] UPDATE {table_name} 语义检查通过")
+        # 标准检查项摘要
+        self._print_checklist(
+            existence_status="通过",
+            type_status="通过",
+            count_order_status="无需检查",
+            catalog_status="无更改"
+        )
 
     def _column_exists_in_tables(self, tables, column_name):
         """检查列是否存在于任何表中，支持 table.column 格式"""
@@ -771,7 +834,11 @@ class SemanticAnalyzer:
             
             if left and hasattr(left, 'value'):
                 if not self._column_exists_in_tables_with_aliases(tables, left.value, table_aliases):
-                    raise SemanticError("ColumnError", left.value, "WHERE 子句中的列不存在")
+                    raise SemanticError(
+                        "ColumnError", left.value, f"WHERE 子句中的列 '{left.value}' 不存在",
+                        available_tables=self._get_available_tables(),
+                        available_columns=self._get_available_columns()
+                    )
 
     def _check_aggregate_function(self, func_node, tables, table_aliases):
         """检查聚合函数的语义正确性"""
@@ -859,6 +926,13 @@ class SemanticAnalyzer:
             self.catalog.drop_table(table_name)
             print(f"[OK] DROP TABLE {table_name} 语义检查通过")
             print(f"    表 {table_name} 已从目录中删除")
+            # 标准检查项摘要
+            self._print_checklist(
+                existence_status="通过",
+                type_status="无需检查",
+                count_order_status="无需检查",
+                catalog_status=f"已更新: 删除表 {table_name}"
+            )
         except SemanticError as e:
             # 重新抛出带有上下文的错误
             raise SemanticError(

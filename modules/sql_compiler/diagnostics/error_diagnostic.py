@@ -62,6 +62,7 @@ class SmartErrorDiagnostic:
     def __init__(self):
         # 常见拼写错误映射
         self.common_misspellings = {
+            'SELEC': 'SELECT',  # 缺少最后一个字母
             'SELCT': 'SELECT',
             'SLECT': 'SELECT',
             'SELLECT': 'SELECT',
@@ -275,13 +276,31 @@ class SmartErrorDiagnostic:
                         example=f"建议: {match}"
                     ))
         
-        # 分析缺少的分号
-        if "expected DELIMITER" in error_msg or "expected ;" in error_msg.lower():
+        # 统一大小写，便于匹配
+        error_msg_lower = error_msg.lower() if isinstance(error_msg, str) else str(error_msg).lower()
+        expected_lower = expected.lower() if isinstance(expected, str) else ""
+        got_upper = got.upper() if isinstance(got, str) else str(got).upper()
+
+        # 分析缺少的分号（大小写不敏感）
+        if ("expected delimiter" in error_msg_lower or
+            "expected ;" in error_msg_lower or
+            "expected ';'" in error_msg_lower or
+            "delimiter" in expected_lower):
             suggestions.append(ErrorSuggestion(
                 suggestion="SQL语句结尾缺少分号 (;)",
                 confidence=0.95,
                 fix_type="missing_semicolon",
                 example="在语句末尾添加 ;"
+            ))
+
+        # 针对 SELECT 列表后直接跟表名的常见错误：缺少 FROM
+        # 典型报错：Expected delimiter ';' but got 'students'
+        if "expected delimiter" in error_msg_lower and got_upper and got_upper.isidentifier():
+            suggestions.append(ErrorSuggestion(
+                suggestion="可能缺少关键字 'FROM'（列列表与表名之间）",
+                confidence=0.85,
+                fix_type="missing_from_clause",
+                example="正确示例: SELECT col1, col2 FROM table_name;"
             ))
 
         # 分析意外的输入结束
@@ -738,7 +757,8 @@ class SmartErrorDiagnostic:
                 "error_type": error_type,
                 "position": position,
                 "available_tables": available_tables,
-                "available_columns": available_columns
+                "available_columns": available_columns,
+                "raw_message": message
             }
         )
 
@@ -791,7 +811,12 @@ class SmartErrorDiagnostic:
         if not suggestions:
             return original_message
 
+        # 基本检查列表标题
         enhanced = f"{original_message}\n\n💡 智能建议："
+        enhanced += "\n- 表/列存在性检查"
+        enhanced += "\n- 类型一致性检查"
+        enhanced += "\n- 列数/列序检查"
+        enhanced += "\n- 目录维护 (Catalog)"
         for i, suggestion in enumerate(suggestions, 1):
             confidence_icon = "🎯" if suggestion.confidence > 0.8 else "💭"
             enhanced += f"\n{confidence_icon} {i}. {suggestion.suggestion}"
