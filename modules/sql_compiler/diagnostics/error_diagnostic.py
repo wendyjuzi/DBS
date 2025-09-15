@@ -747,7 +747,7 @@ class SmartErrorDiagnostic:
 
         return DiagnosticResult(
             error_type="SemanticError",
-            message=self._enhance_error_message(message, suggestions),
+            message=self._prepend_structured_triplet(error_type, position, message) + "\n" + self._enhance_error_message(message, suggestions),
             line=0,  # 语义错误通常没有具体行号
             column=0,
             severity=ErrorSeverity.ERROR,
@@ -811,12 +811,8 @@ class SmartErrorDiagnostic:
         if not suggestions:
             return original_message
 
-        # 基本检查列表标题
+        # 仅展示智能建议条目
         enhanced = f"{original_message}\n\n💡 智能建议："
-        enhanced += "\n- 表/列存在性检查"
-        enhanced += "\n- 类型一致性检查"
-        enhanced += "\n- 列数/列序检查"
-        enhanced += "\n- 目录维护 (Catalog)"
         for i, suggestion in enumerate(suggestions, 1):
             confidence_icon = "🎯" if suggestion.confidence > 0.8 else "💭"
             enhanced += f"\n{confidence_icon} {i}. {suggestion.suggestion}"
@@ -824,6 +820,14 @@ class SmartErrorDiagnostic:
                 enhanced += f"\n   示例: {suggestion.example}"
 
         return enhanced
+
+    @staticmethod
+    def _prepend_structured_triplet(err_type: str, position: str, reason: str) -> str:
+        """将标准三元组格式置顶，便于GUI在出错时展示。
+
+        形如: [错误类型, 位置, 原因]
+        """
+        return f"[{err_type}, {position}, {reason}]"
 
 
 class ErrorFormatter:
