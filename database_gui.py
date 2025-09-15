@@ -832,30 +832,63 @@ SELECT id, name, score FROM students WHERE age > 18;"""
             self.result_text.insert(tk.END, f"模拟执行: {sql[:100]}...\n")
             return
 
-        try:
-            self.log(f"执行SQL ({self.current_mode}模式): {sql[:50]}...")
+        # 支持多语句：按分号拆分，保留语句顺序，逐条执行并汇总；仿照 CLI
+        statements = [s.strip() for s in sql.replace('\r','').split(';') if s.strip()]
+        if not statements:
+            return
 
-            start_time = time.time()
+        self.log(f"执行SQL ({self.current_mode}模式): 共 {len(statements)} 条")
+        total_start = time.time()
+        successes = 0
 
-            # 根据模式选择执行引擎
-            if self.current_mode == "adapter":
-                result = self.adapter.execute(sql)
-            else:
-                result = self.core_engine.execute(sql)
+        for idx, stmt in enumerate(statements, 1):
+            # 还原分号
+            stmt_sql = stmt + ';'
+            self.result_text.insert(tk.END, f"\n-- [{idx}/{len(statements)}] {stmt_sql}\n")
+            try:
+                start_time = time.time()
+                if self.current_mode == "adapter":
+                    # GUI 内支持 EXPORT/IMPORT 命令，仿 CLI
+                    up = stmt_sql.strip().upper()
+                    if up.startswith("EXPORT TABLE"):
+                        self._handle_export_command(stmt_sql)
+                        self.result_text.insert(tk.END, "✓ 导出命令已执行\n")
+                        successes += 1
+                        continue
+                    if up.startswith("IMPORT TABLE"):
+                        self._handle_import_command(stmt_sql)
+                        self.result_text.insert(tk.END, "✓ 导入命令已执行\n")
+                        successes += 1
+                        continue
+                    result = self.adapter.execute(stmt_sql)
+                else:
+                    # CORE 模式与 CLI 一致：拦截不支持的高级命令
+                    up = stmt_sql.strip().upper().rstrip(';')
+                    unsupported = (
+                        up in ("BEGIN", "COMMIT", "ROLLBACK", "SHOW TRANSACTION") or
+                        up.startswith("SET AUTOCOMMIT") or
+                        up.startswith("CREATE INDEX") or up.startswith("DROP INDEX") or
+                        up.startswith("CREATE COMPOSITE INDEX") or up.startswith("DROP COMPOSITE INDEX") or
+                        up == "SHOW INDEXES" or up == "SHOW COMPOSITE INDEXES" or
+                        up.startswith("EXPLAIN ")
+                    )
+                    if unsupported:
+                        result = {"status": "error", "error": "该命令在 CORE 模式暂不支持，请切换 MODE ADAPTER", "affected_rows": 0, "data": []}
+                    else:
+                        result = self.core_engine.execute(stmt_sql)
 
-            execution_time = time.time() - start_time
+                exec_ms = time.time() - start_time
+                self.display_result(result, exec_ms)
+                successes += 1 if result.get('status') != 'error' else 0
+            except Exception as e:
+                error_msg = f"执行错误: {str(e)}"
+                self.result_text.insert(tk.END, error_msg + "\n")
+                self.result_text.insert(tk.END, "\n💡 智能建议：\n" + self._suggest_fixes(stmt_sql, str(e)))
+                # 不中断，继续执行后续语句
 
-            # 显示结果
-            self.display_result(result, execution_time)
-            self.log(f"✓ SQL执行完成 ({execution_time:.3f}s)")
-
-            # 更新监控信息
-            self.update_monitors()
-
-        except Exception as e:
-            error_msg = f"执行错误: {str(e)}"
-            self.result_text.insert(tk.END, error_msg)
-            self.log(f"❌ {error_msg}")
+        self.log(f"✓ 多语句执行完成 ({time.time()-total_start:.3f}s) 成功 {successes}/{len(statements)} 条")
+        # 更新监控信息
+        self.update_monitors()
 
     def display_result(self, result: Dict[str, Any], execution_time: float):
         """显示查询结果"""
@@ -1027,7 +1060,12 @@ C++加速: {stats.get('cpp_enabled', False)}
                 self.storage_status.config(text=f"存储: {status}", foreground=color)
             elif component == "executor":
                 self.executor_status.config(text=f"执行器: {status}", foreground=color)
-
+        # 同步一次目录，确保能识别历史表
+        try:
+            if BACKEND_AVAILABLE and self.adapter and hasattr(self.adapter, 'sync_catalog'):
+                self.adapter.sync_catalog()
+        except Exception:
+            pass
         self.update_monitors()
 
     def clear_sql(self):
@@ -1105,6 +1143,39 @@ DELETE FROM students WHERE id = 3;
         self.log_text.insert(tk.END, log_entry)
         self.log_text.see(tk.END)  # 滚动到底部
         self.root.update_idletasks()  # 更新界面
+
+    # ====== 错误启发式智能建议（GUI侧） ======
+    def _suggest_fixes(self, sql_text: str, err_text: str) -> str:
+        tips = []
+        up_sql = (sql_text or "").upper()
+        up_err = (err_text or "").upper()
+        # 1) 多条语句一次执行
+        if (';' in sql_text.strip() and sql_text.strip().count(';') > 1) or "\n" in sql_text:
+            tips.append("💭 1. 每次只执行一条SQL语句，带分号，逐条运行")
+        # 2) 不支持 IF EXISTS
+        if "IF EXISTS" in up_sql:
+            tips.append("🎯 2. 适配器不支持 IF EXISTS，请去掉 IF EXISTS 重试")
+        # 3) DROP MATERIALIZED VIEW 语法
+        if "DROP MATERIALIZED VIEW" in up_sql or "MATERIALIZED" in up_err:
+            tips.append("💭 3. 物化视图建议用菜单‘视图→删除物化视图...’操作")
+        # 4) 表不存在/已存在
+        if ("表不存在" in err_text) or ("TABLE" in up_err and "NOT EXIST" in up_err):
+            tips.append("🎯 4. 请先 CREATE TABLE 再操作，或检查表名拼写；用“执行→EXPLAIN”查看计划")
+        if ("已存在" in err_text) or ("ALREADY EXISTS" in up_err):
+            tips.append("💭 5. 对象已存在，请先 DROP 再 CREATE，或换个名称")
+        # 5) 标识符/关键字冲突
+        if "EXPECTED TOKEN TYPE IDENTIFIER" in up_err and "KEYWORD" in up_err:
+            tips.append("🎯 6. 关键字与标识符冲突，检查是否误写关键字或缺少空格/逗号/括号")
+        # 6) 事务/分号缺失
+        if "EXPECTED ;" in up_err or "EXPECTED DELIMITER" in up_err:
+            tips.append("💭 7. 语句结尾缺少分号；请在每条语句末尾添加 ;")
+        # 7) 视图/过程/触发器语法
+        if any(k in up_sql for k in ["CREATE VIEW", "CREATE MATERIALIZED VIEW", "CREATE PROCEDURE", "CREATE TRIGGER"]):
+            tips.append("💭 8. 这些高级语句建议先在菜单中使用相应向导创建，便于校验语法")
+        # 汇总
+        if not tips:
+            return "(无进一步建议)\n"
+        return "\n".join(tips) + "\n"
 
     # 公共：将列/数据格式化为文本表格
     def _format_table_text(self, columns, data, max_width=30):

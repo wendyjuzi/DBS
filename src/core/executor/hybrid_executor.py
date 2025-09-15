@@ -459,34 +459,145 @@ class HybridExecutionEngine:
             raise ExecutionError(f"WHERE条件解析错误: {str(e)}")
 
     def _execute_update(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """执行UPDATE语句"""
+        """执行UPDATE语句（兼容编译器计划格式），并在必要时做回退更新。"""
         table_name = plan["table"]
-        set_clauses = plan.get("set_clauses", [])
+        # 兼容两种字段：set_clauses(list) | set_clause(dict)
+        raw_set = plan.get("set_clauses")
+        if not raw_set:
+            raw_set = plan.get("set_clause")
+        # 归一化为 (col, val) 列表
+        if isinstance(raw_set, dict):
+            set_pairs = [(k, raw_set[k]) for k in raw_set.keys()]
+        elif isinstance(raw_set, list):
+            # 允许 list[ {col:val} ] 或 list[ (col,val) ]
+            pairs = []
+            for it in raw_set:
+                if isinstance(it, dict) and it:
+                    k = list(it.keys())[0]; pairs.append((k, it[k]))
+                elif isinstance(it, (list, tuple)) and len(it) == 2:
+                    pairs.append((it[0], it[1]))
+            set_pairs = pairs
+        else:
+            set_pairs = []
+
+        # where：支持字符串 where | list[ {column,op,value} ]
         where_clause = plan.get("where")
-        
-        print(f"[EXEC] UPDATE {table_name} SET {set_clauses} WHERE {where_clause}")
-        
+        if where_clause is None:
+            wc_list = plan.get("where_clause")
+        else:
+            wc_list = None
+
+        print(f"[EXEC] UPDATE {table_name} SET {set_pairs} WHERE {where_clause if where_clause is not None else wc_list}")
+
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
         if table_name not in self.table_columns:
             raise CatalogError(f"表 '{table_name}' 不存在")
-        
-        # 构建WHERE谓词
-        predicate = self._build_predicate(table_name, where_clause)
-        
-        # 调用C++ UPDATE算子
-        # 简化：记录 WAL，调用底层更新，无法轻易提取旧值时跳过索引维护
+
+        # 构建谓词
+        if isinstance(where_clause, str) and where_clause:
+            predicate = self._build_predicate(table_name, where_clause)
+        elif isinstance(wc_list, list) and wc_list:
+            # AND 连接的简单条件
+            cols = self.table_columns.get(table_name, [])
+            def make_pred(conds, cols_names):
+                def eval_num(lhs: str, op: str, rhs: str) -> bool:
+                    try:
+                        ln = float(lhs); rn = float(rhs)
+                        if op == "=": return ln == rn
+                        if op == ">": return ln > rn
+                        if op == "<": return ln < rn
+                        if op == ">=": return ln >= rn
+                        if op == "<=": return ln <= rn
+                        if op == "!=": return ln != rn
+                        return False
+                    except Exception:
+                        if op == "=": return lhs == rhs
+                        if op == ">": return lhs > rhs
+                        if op == "<": return lhs < rhs
+                        if op == ">=": return lhs >= rhs
+                        if op == "<=": return lhs <= rhs
+                        if op == "!=": return lhs != rhs
+                        return False
+                idx_ops_vals = []
+                for c in conds:
+                    col = str(c.get("column",""))
+                    op = str(c.get("op","=")).upper()
+                    val = str(c.get("value",""))
+                    try:
+                        idx = cols_names.index(col)
+                        idx_ops_vals.append((idx, op, val))
+                    except ValueError:
+                        # 未知列，条件恒假
+                        idx_ops_vals.append((-1, op, val))
+                def pred(x):
+                    for i,op,v in idx_ops_vals:
+                        if i < 0 or i >= len(x) or not eval_num(str(x[i]), op, v):
+                            return False
+                    return True
+                return pred
+            predicate = make_pred(wc_list, cols)
+        else:
+            predicate = self._build_predicate(table_name, where_clause or "")
+
+        # 记录 WAL
         txid = self._current_txid or self._txm.begin().txid
         is_implicit_tx = self._current_txid is None
-        self._wal.append(LogRecord(txid=txid, op="UPDATE", table=table_name, payload={"set": set_clauses, "where": where_clause}))
-        updated_count = self.executor.update_rows(table_name, set_clauses, predicate)
+        self._wal.append(LogRecord(txid=txid, op="UPDATE", table=table_name, payload={"set": set_pairs, "where": where_clause or wc_list}))
+
+        updated_count = 0
+        # 尝试底层批量 UPDATE（可能忽略 set/where 结构差异）
+        try:
+            updated_count = int(self.executor.update_rows(table_name, set_pairs, predicate))
+        except Exception:
+            updated_count = 0
+
+        # 如无更新，做回退：按谓词扫描 -> 基于主键删除再插入新行
+        if updated_count == 0 and set_pairs:
+            col_names = self.table_columns.get(table_name, [])
+            pk_col = self._get_pk_column(table_name)
+            if pk_col and pk_col in col_names:
+                pk_idx = col_names.index(pk_col)
+                affected = 0
+                for r in self.executor.seq_scan(table_name):
+                    vals = r.get_values()
+                    try:
+                        if not predicate(vals):
+                            continue
+                    except Exception:
+                        continue
+                    new_vals = list(vals)
+                    for col, v in set_pairs:
+                        try:
+                            cidx = col_names.index(str(col))
+                            new_vals[cidx] = str(v)
+                        except ValueError:
+                            continue
+                    # 物化更新：先按 PK 删除，再插入
+                    pkv = str(vals[pk_idx]) if pk_idx < len(vals) else ""
+                    try:
+                        self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
+                    except Exception:
+                        pass
+                    ok = False
+                    try:
+                        ok = bool(self.executor.insert(table_name, new_vals))
+                    except Exception:
+                        ok = False
+                    if ok:
+                        affected += 1
+                        # 维护二级索引
+                        try:
+                            self.index_manager.on_delete(table_name, pkv)
+                            self.index_manager.on_insert(table_name, new_vals, col_names)
+                        except Exception:
+                            pass
+                updated_count = affected
+
         if is_implicit_tx:
             self._txm.commit(txid)
-        
-        return {
-            "affected_rows": updated_count,
-            "metadata": {"message": f"更新了 {updated_count} 行"}
-        }
+
+        return {"affected_rows": updated_count, "metadata": {"message": f"更新了 {updated_count} 行"}}
 
     # --- 事务 API ---
     def begin(self) -> str:
@@ -1047,6 +1158,52 @@ class HybridExecutionEngine:
             # 清理本地缓存
             if table_name in self.table_columns:
                 del self.table_columns[table_name]
+            # 额外清理：删除对应的数据页文件（*_page_*.bin），确保物理清理干净
+            try:
+                import os, re
+                patterns = [
+                    re.compile(rf"^{re.escape(table_name)}_page_\d+\.bin$", re.IGNORECASE)
+                ]
+                # 限定扫描目录：cwd、工程根、工程根上一级，深度不超过2层
+                scan_dirs = []
+                try:
+                    scan_dirs.append(os.getcwd())
+                except Exception:
+                    pass
+                try:
+                    from pathlib import Path as _P
+                    from ...api.sql_compiler_adapter import proj_root as _PROJ  # type: ignore
+                    scan_dirs.append(str(_PROJ))
+                    scan_dirs.append(str(_P(_PROJ).parent))
+                except Exception:
+                    pass
+                seen = set()
+                for base in scan_dirs:
+                    if not base or not os.path.isdir(base):
+                        continue
+                    for root, _dirs, files in os.walk(base):
+                        # 控制扫描深度
+                        try:
+                            from pathlib import Path as _PP
+                            depth = len(_PP(root).relative_to(base).parts) if _PP(root) != _PP(base) else 0
+                            if depth > 2:
+                                continue
+                        except Exception:
+                            pass
+                        for fn in files:
+                            fpath = os.path.join(root, fn)
+                            if fpath in seen:
+                                continue
+                            for pat in patterns:
+                                if pat.match(fn):
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+                                    seen.add(fpath)
+                                    break
+            except Exception:
+                pass
             
             return {
                 "affected_rows": 0,
