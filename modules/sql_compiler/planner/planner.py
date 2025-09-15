@@ -127,6 +127,12 @@ class Planner:
             filter_node.add_child(current_node)
             current_node = filter_node
         
+        # 处理聚合函数
+        if ast.get("aggregates") and len(ast["aggregates"]) > 0:
+            aggregate_node = LogicalPlan("Aggregate", functions=ast["aggregates"])
+            aggregate_node.add_child(current_node)
+            current_node = aggregate_node
+        
         # 处理 GROUP BY
         if ast.get("group_by"):
             group_node = LogicalPlan("GroupBy", columns=ast["group_by"])
@@ -140,10 +146,13 @@ class Planner:
             current_node = sort_node
         
         # 最终的投影操作
-        project_node = LogicalPlan("Project", columns=ast["columns"])
-        project_node.add_child(current_node)
-        
-        return project_node
+        # 如果有聚合函数，直接返回聚合节点，否则添加投影节点
+        if ast.get("aggregates") and len(ast["aggregates"]) > 0:
+            return current_node
+        else:
+            project_node = LogicalPlan("Project", columns=ast["columns"])
+            project_node.add_child(current_node)
+            return project_node
 
     def plan_update(self, ast):
         root = LogicalPlan("Update", table=ast["table"], assignments=ast["assignments"])

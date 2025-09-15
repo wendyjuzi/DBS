@@ -88,6 +88,15 @@ class ASTNode:
         elif self.node_type == "SELECT":
             result["columns"] = [child.value for child in self.children if child.node_type == "COLUMN"]
             
+            # 处理聚合函数
+            aggregates = []
+            for child in self.children:
+                if child.node_type == "AGGREGATE":
+                    agg_func = child.value
+                    agg_arg = next((c.value for c in child.children if c.node_type == "ARG"), None)
+                    aggregates.append({"function": agg_func, "column": agg_arg})
+            result["aggregates"] = aggregates
+            
             # 处理 INTO 子句
             into_node = next((child for child in self.children if child.node_type == "INTO"), None)
             result["into_variable"] = into_node.value if into_node else None
