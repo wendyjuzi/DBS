@@ -208,11 +208,40 @@ class SQLCompilerAdapter:
         
         elif plan_type == "Update":
             # 转换UPDATE计划
+            def _extract_where(node):
+                # 递归从 children 中寻找条件
+                conds = []
+                if not isinstance(node, dict):
+                    return conds
+                ntype = node.get("type")
+                props = node.get("props", {})
+                if ntype in ("SeqScan", "Filter"):
+                    if "conditions" in props and isinstance(props.get("conditions"), list):
+                        for c in props.get("conditions", []):
+                            conds.append({
+                                "column": c.get("left", ""),
+                                "op": c.get("op", "="),
+                                "value": c.get("right", "")
+                            })
+                    elif "condition" in props and isinstance(props.get("condition"), dict):
+                        c = props.get("condition")
+                        conds.append({
+                            "column": c.get("left", ""),
+                            "op": c.get("op", "="),
+                            "value": c.get("right", "")
+                        })
+                for ch in node.get("children", []) or []:
+                    conds.extend(_extract_where(ch))
+                return conds
+            set_clause = plan_dict["props"].get("set_clause") or plan_dict["props"].get("set") or plan_dict["props"].get("assignments") or []
+            where_clause = plan_dict["props"].get("where_clause")
+            if not where_clause:
+                where_clause = _extract_where(plan_dict)
             return {
                 "type": "UPDATE",
                 "table": plan_dict["props"]["table"].upper(),
-                "set_clause": plan_dict["props"].get("set_clause", {}),
-                "where_clause": plan_dict["props"].get("where_clause", {})
+                "set_clause": set_clause,
+                "where_clause": where_clause
             }
         
         elif plan_type == "Delete":
@@ -363,6 +392,11 @@ class SQLCompilerAdapter:
             
             print(f"[ADAPTER] 语法分析成功，生成 {len(ast_list)} 个AST节点")
             
+            # 2.5 同步编译器目录与存储中的真实表
+            try:
+                self._sync_compiler_catalog_from_storage()
+            except Exception:
+                pass
             # 3. 语义分析
             semantic_errors = 0
             for ast in ast_list:
@@ -1072,6 +1106,41 @@ class SQLCompilerAdapter:
     # === 索引相关 ===
     def _parse_ident(self, token: str) -> str:
         return token.strip().strip('`"[]')
+
+    def _sync_compiler_catalog_from_storage(self) -> None:
+        """将底层存储中的表结构同步到编译器目录中，避免语义阶段报表不存在。"""
+        try:
+            # 获取表名
+            if hasattr(self.storage_engine, 'get_table_names'):
+                names = list(self.storage_engine.get_table_names())
+            elif hasattr(self.storage_engine, 'list_tables'):
+                names = list(self.storage_engine.list_tables())
+            else:
+                names = list(getattr(self.hybrid_executor, 'table_columns', {}).keys())
+        except Exception:
+            names = []
+        # 逐表获取列
+        for t in names:
+            try:
+                tu = str(t).upper()
+                # 已存在则跳过，避免覆盖已登记的类型信息
+                if hasattr(self.catalog, 'has_table') and self.catalog.has_table(tu):
+                    continue
+                if hasattr(self.storage_engine, 'get_table_columns'):
+                    cols = list(self.storage_engine.get_table_columns(tu))
+                else:
+                    cols = list(getattr(self.hybrid_executor, 'table_columns', {}).get(tu, []))
+                cols_u = [str(c).upper() for c in (cols or [])]
+                # 将列名转换为列->类型的映射，无法探测类型时默认 STRING
+                col_map = {c: "STRING" for c in cols_u}
+                try:
+                    # 使用 catalog 标准入口创建，若已存在会抛错则忽略
+                    self.catalog.create_table(tu, col_map)
+                except Exception:
+                    # 已存在或创建失败则忽略
+                    pass
+            except Exception:
+                continue
 
     def _handle_create_index(self, sql: str) -> Dict[str, Any]:
         # 语法（增强版）：
@@ -1804,15 +1873,42 @@ class SQLCompilerAdapter:
     def get_catalog_info(self) -> Dict[str, Any]:
         """获取系统目录信息"""
         try:
-            table_names = self.storage_engine.get_table_names()
-            catalog_info = {}
-            for table_name in table_names:
-                columns = self.storage_engine.get_table_columns(table_name)
-                catalog_info[table_name] = {
-                    "columns": columns,
-                    "has_index": self.storage_engine.has_index(table_name),
-                    "index_size": self.storage_engine.get_index_size(table_name)
-                }
+            catalog_info: Dict[str, Any] = {}
+            names: List[str] = []
+            # 兼容不同存储引擎接口
+            if hasattr(self.storage_engine, 'get_table_names'):
+                try:
+                    names = list(self.storage_engine.get_table_names())
+                except Exception:
+                    names = []
+            elif hasattr(self.storage_engine, 'list_tables'):
+                try:
+                    names = list(self.storage_engine.list_tables())
+                except Exception:
+                    names = []
+            else:
+                # 无法枚举表名，尝试从执行器缓存中获取
+                try:
+                    names = list(getattr(self.hybrid_executor, 'table_columns', {}).keys())
+                except Exception:
+                    names = []
+            for table_name in names:
+                try:
+                    if hasattr(self.storage_engine, 'get_table_columns'):
+                        columns = list(self.storage_engine.get_table_columns(table_name))
+                    else:
+                        columns = list(getattr(self.hybrid_executor, 'table_columns', {}).get(table_name, []))
+                except Exception:
+                    columns = []
+                try:
+                    has_idx = bool(self.storage_engine.has_index(table_name)) if hasattr(self.storage_engine, 'has_index') else False
+                except Exception:
+                    has_idx = False
+                try:
+                    idx_size = int(self.storage_engine.get_index_size(table_name)) if hasattr(self.storage_engine, 'get_index_size') else 0
+                except Exception:
+                    idx_size = 0
+                catalog_info[table_name] = {"columns": columns, "has_index": has_idx, "index_size": idx_size}
             return catalog_info
         except Exception as e:
             print(f"[ADAPTER] 获取目录信息失败: {e}")
