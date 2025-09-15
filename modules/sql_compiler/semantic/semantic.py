@@ -266,6 +266,8 @@ class SemanticAnalyzer:
             self._check_set_statement(ast)
         elif node_type == "DELIMITER_STATEMENT":
             self._check_delimiter_statement(ast)
+        elif node_type in ["SHOW_TABLES", "SHOW_DATABASES", "SHOW_SCHEMAS"]:
+            self._check_show_statement(ast)
 
     def _check_create(self, ast):
         table_name = ast.value
@@ -1306,3 +1308,19 @@ class SemanticAnalyzer:
                 raise SemanticError("VariableError", var_name, "变量未声明")
             
             print(f"[OK] SET {var_name} 语义检查通过")
+
+    def _check_show_statement(self, ast):
+        """检查 SHOW 语句的语义"""
+        show_type = ast.node_type
+        
+        if show_type == "SHOW_TABLES":
+            # SHOW TABLES 不需要特殊的语义检查，总是有效的
+            print(f"[OK] SHOW TABLES 语义检查通过")
+        elif show_type == "SHOW_DATABASES":
+            # SHOW DATABASES 不需要特殊的语义检查，总是有效的
+            print(f"[OK] SHOW DATABASES 语义检查通过")
+        elif show_type == "SHOW_SCHEMAS":
+            # SHOW SCHEMAS 不需要特殊的语义检查，总是有效的
+            print(f"[OK] SHOW SCHEMAS 语义检查通过")
+        else:
+            raise SemanticError("ShowError", show_type, f"不支持的 SHOW 语句类型: {show_type}")

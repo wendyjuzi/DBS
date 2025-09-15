@@ -237,6 +237,8 @@ class ASTNode:
             for child in self.children:
                 if child.node_type == "ARGUMENTS":
                     result["arguments"] = child.value.split(",") if child.value else []
+        elif self.node_type in ["SHOW_TABLES", "SHOW_DATABASES", "SHOW_SCHEMAS"]:
+            result["show_type"] = self.node_type.replace("SHOW_", "").lower()
         else:
             # 默认格式，用于其他类型的节点
             result["value"] = self.value
@@ -409,6 +411,8 @@ class Parser:
             return self.rollback()
         elif self.current_token.lexeme.upper() == "CALL":
             return self.call_procedure()
+        elif self.current_token.lexeme.upper() == "SHOW":
+            return self.show()
         else:
             raise ParseError(f"Unsupported statement beginning with '{self.current_token.lexeme}'", self.current_token)
 
@@ -1809,6 +1813,25 @@ class Parser:
         else:
             raise ParseError(f"Unexpected token in expression: {self.current_token.lexeme}", 
                            self.current_token.line, self.current_token.column)
+
+    def show(self):
+        """解析 SHOW 语句"""
+        self.expect("KEYWORD", "SHOW")
+        
+        if self.current_token.lexeme.upper() == "TABLES":
+            self.expect("KEYWORD", "TABLES")
+            show_node = ASTNode("SHOW_TABLES", "SHOW TABLES")
+        elif self.current_token.lexeme.upper() == "DATABASES":
+            self.expect("KEYWORD", "DATABASES")
+            show_node = ASTNode("SHOW_DATABASES", "SHOW DATABASES")
+        elif self.current_token.lexeme.upper() == "SCHEMAS":
+            self.expect("KEYWORD", "SCHEMAS")
+            show_node = ASTNode("SHOW_SCHEMAS", "SHOW SCHEMAS")
+        else:
+            raise ParseError(f"Unsupported SHOW statement: SHOW {self.current_token.lexeme}", self.current_token)
+        
+        self.expect_delimiter()
+        return show_node
 
 # 测试
 if __name__ == "__main__":

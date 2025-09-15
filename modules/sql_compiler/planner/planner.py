@@ -78,6 +78,8 @@ class Planner:
                 plan = self.plan_procedure(ast)
             elif stmt_type == "DELIMITER_STATEMENT":
                 plan = self.plan_delimiter(ast)
+            elif stmt_type in ["SHOW_TABLES", "SHOW_DATABASES", "SHOW_SCHEMAS"]:
+                plan = self.plan_show(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             
@@ -302,6 +304,19 @@ class Planner:
             )
         else:
             raise PlanError(f"未知的存储过程语句类型: {stmt_type}")
+
+    def plan_show(self, ast):
+        """生成 SHOW 语句的执行计划"""
+        show_type = ast["show_type"]
+        
+        if show_type == "tables":
+            return LogicalPlan("ShowTables")
+        elif show_type == "databases":
+            return LogicalPlan("ShowDatabases")
+        elif show_type == "schemas":
+            return LogicalPlan("ShowSchemas")
+        else:
+            raise PlanError(f"不支持的 SHOW 语句类型: {show_type}")
 
     def plan_delimiter(self, ast):
         """生成 DELIMITER 语句的执行计划"""
