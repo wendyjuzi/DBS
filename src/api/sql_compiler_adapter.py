@@ -88,6 +88,18 @@ class SQLCompilerAdapter:
         self.index_manager = IndexManager()
         # 轻量统计缓存：table -> { 'rows': int, 'cols': {col: {'ndv': int, 'min': val, 'max': val}} }
         self._stats: Dict[str, Any] = {}
+        # 视图存储（非物化）：name -> {'sql': select_sql}
+        self._views: Dict[str, Dict[str, Any]] = {}
+        # 约束元数据
+        self._primary_key: Dict[str, str] = {}              # table -> pk_column
+        self._unique_cols: Dict[str, List[str]] = {}         # table -> [unique_columns]
+        self._foreign_keys: Dict[str, List[Dict[str, str]]] = {}  # table -> [{column, ref_table, ref_column}]
+        # 触发器：table -> [ {name, timing, event, statements: [sql]} ]
+        self._triggers: Dict[str, List[Dict[str, Any]]] = {}
+        # 物化视图：name -> {sql, physical_table}
+        self._mat_views: Dict[str, Dict[str, str]] = {}
+        # 存储过程：name -> {statements: [sql]}
+        self._procedures: Dict[str, Dict[str, Any]] = {}
     
     def _convert_plan_to_executor_format(self, compiler_plan) -> Dict[str, Any]:
         """
@@ -269,6 +281,32 @@ class SQLCompilerAdapter:
         print(f"[ADAPTER] 执行SQL: {sql}")
         # 简易事务控制语句直通处理
         upper_sql = sql.upper().rstrip(';')
+        # 视图定义/删除直通处理（先于编译器）
+        if upper_sql.startswith("CREATE VIEW "):
+            return self._handle_create_view(sql)
+        if upper_sql.startswith("DROP VIEW "):
+            return self._handle_drop_view(sql)
+        # 物化视图
+        if upper_sql.startswith("CREATE MATERIALIZED VIEW "):
+            return self._handle_create_materialized_view(sql)
+        if upper_sql.startswith("DROP MATERIALIZED VIEW "):
+            return self._handle_drop_materialized_view(sql)
+        if upper_sql.startswith("REFRESH MATERIALIZED VIEW "):
+            return self._handle_refresh_materialized_view(sql)
+        # 触发器
+        if upper_sql.startswith("CREATE TRIGGER "):
+            return self._handle_create_trigger(sql)
+        if upper_sql.startswith("DROP TRIGGER "):
+            return self._handle_drop_trigger(sql)
+        if upper_sql == "SHOW TRIGGERS":
+            return self._handle_show_triggers()
+        # 存储过程
+        if upper_sql.startswith("CREATE PROCEDURE "):
+            return self._handle_create_procedure(sql)
+        if upper_sql.startswith("DROP PROCEDURE "):
+            return self._handle_drop_procedure(sql)
+        if upper_sql.startswith("CALL "):
+            return self._handle_call(sql)
         if upper_sql == "BEGIN":
             return self._begin_transaction()
         if upper_sql == "COMMIT":
@@ -293,6 +331,14 @@ class SQLCompilerAdapter:
             return self._handle_show_composite_indexes()
         
         try:
+            # 视图查询重写（仅支持单表 FROM view 的简单 SELECT）
+            vw_rewrite = self._try_execute_view_select(sql)
+            if vw_rewrite is not None:
+                return vw_rewrite
+            # CREATE TABLE 约束预处理：提取并剥离 PRIMARY KEY/UNIQUE/FOREIGN KEY
+            if upper_sql.startswith("CREATE TABLE "):
+                sql = self._preprocess_create_table_constraints(sql)
+                upper_sql = sql.upper().rstrip(';')
             # 1. 词法分析
             lexer = Lexer(sql)
             tokens, errors = lexer.tokenize()
@@ -362,6 +408,7 @@ class SQLCompilerAdapter:
                     table = executor_plan.get("table")
                     values = executor_plan.get("values", [])
                     if table and values:
+                        self._enforce_unique_constraints_on_insert(table, values)
                         self._txn_insert_buffer.setdefault(table, []).append(values)
                         print(f"[ADAPTER][TXN] 缓冲 INSERT -> {table}: {values}")
                         result = {"affected_rows": 1, "metadata": {"message": "已加入事务缓冲 (INSERT)"}}
@@ -369,6 +416,12 @@ class SQLCompilerAdapter:
                         result = {"affected_rows": 0, "metadata": {"message": "INSERT 语句不完整，已忽略"}}
                 else:
                     # 在非事务或不缓冲的语句直接执行，带路径选择与EXPLAIN
+                    # INSERT 的唯一性校验
+                    if executor_plan.get("type") == "INSERT":
+                        table = executor_plan.get("table")
+                        values = executor_plan.get("values", [])
+                        if table and values:
+                            self._enforce_unique_constraints_on_insert(table, values)
                     result = self._execute_with_index_optimization(self._choose_path(executor_plan))
                 results.append(result)
 
@@ -590,6 +643,9 @@ class SQLCompilerAdapter:
                 continue
             try:
                 print(f"[ADAPTER][TXN] COMMIT -> 批量插入 {table}: {len(rows)} 行")
+                # 事务提交前做唯一性整体校验
+                for r in rows:
+                    self._enforce_unique_constraints_on_insert(table, r)
                 count = int(self.hybrid_executor.insert_many(table, rows))
                 # 批量更新索引
                 cols = self.hybrid_executor.table_columns.get(table, [])
@@ -654,13 +710,15 @@ class SQLCompilerAdapter:
         return token.strip().strip('`"[]')
 
     def _handle_create_index(self, sql: str) -> Dict[str, Any]:
-        # 语法（简化版）：CREATE INDEX idx ON table(col) PK pkcol;
+        # 语法（增强版）：
+        # CREATE INDEX idx ON table(col) [USING BTREE|HASH] PK pkcol;
         up = sql.strip().rstrip(';')
         try:
             # 粗略解析
             # 找到 ON 与 PK 关键字
-            on_pos = up.upper().find(" ON ")
-            pk_pos = up.upper().find(" PK ")
+            u = up.upper()
+            on_pos = u.find(" ON ")
+            pk_pos = u.find(" PK ")
             if on_pos == -1 or pk_pos == -1 or pk_pos < on_pos:
                 raise ValueError("语法: CREATE INDEX idx ON table(col) PK pkcol;")
             on_part = up[on_pos + 4: pk_pos].strip()
@@ -668,8 +726,23 @@ class SQLCompilerAdapter:
             # on_part 形如: table(col)
             table = on_part.split('(')[0].strip()
             col = on_part[on_part.find('(')+1:on_part.rfind(')')].strip()
+            # 解析 USING 可选项
+            strategy = "BTREE"
+            using_pos = u.find(" USING ", on_pos, pk_pos)
+            if using_pos != -1:
+                # 形如 USING BTREE/HASH
+                strat = up[using_pos + 7: pk_pos].strip()
+                # 取第一个单词
+                strategy = (strat.split()[0] if strat else "BTREE").upper()
+                # 修正 on_part 去掉 USING 片段
+                on_part = up[on_pos + 4: using_pos].strip()
+                table = on_part.split('(')[0].strip()
+                col = on_part[on_part.find('(')+1:on_part.rfind(')')].strip()
+
             pkcol = pk_part
-            ok = self.index_manager.create_index(self._parse_ident(table), self._parse_ident(col), self._parse_ident(pkcol))
+            ok = self.index_manager.create_index(
+                self._parse_ident(table), self._parse_ident(col), self._parse_ident(pkcol), strategy=strategy
+            )
             msg = "索引已存在" if not ok else "索引创建成功"
             return {"affected_rows": 0, "metadata": {"message": msg}}
         except Exception as e:
@@ -709,7 +782,7 @@ class SQLCompilerAdapter:
 
     def _handle_show_indexes(self) -> Dict[str, Any]:
         items = self.index_manager.get_indexes()
-        return {"affected_rows": len(items), "data": [[it["table"], it["column"], it["pk_column"]] for it in items], "metadata": {"columns": ["table", "column", "pk"]}}
+        return {"affected_rows": len(items), "data": [[it["table"], it["column"], it["pk_column"], it.get("strategy","BTREE")] for it in items], "metadata": {"columns": ["table", "column", "pk", "strategy"]}}
 
     def _handle_show_composite_indexes(self) -> Dict[str, Any]:
         # 返回每张表的复合索引列下标
@@ -753,9 +826,393 @@ class SQLCompilerAdapter:
         except Exception as e:
             raise SQLSyntaxError(f"CREATE COMPOSITE INDEX 解析失败: {e}")
 
+    # === 触发器实现（适配器层） ===
+    def _handle_create_trigger(self, sql: str) -> Dict[str, Any]:
+        # 简化语法：CREATE TRIGGER name BEFORE|AFTER INSERT|UPDATE|DELETE ON table AS BEGIN <stmt1>; <stmt2>; END;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("CREATE TRIGGER "):
+                raise ValueError("语法: CREATE TRIGGER name BEFORE|AFTER INSERT|UPDATE|DELETE ON table AS BEGIN ... END;")
+            rest = s[len("CREATE TRIGGER "):].strip()
+            name = rest.split()[0]
+            rest2 = rest[len(name):].strip()
+            timing = "BEFORE" if rest2.upper().startswith("BEFORE ") else ("AFTER" if rest2.upper().startswith("AFTER ") else None)
+            if not timing:
+                raise ValueError("缺少 BEFORE/AFTER")
+            rest3 = rest2[len(timing):].strip()
+            ev = None
+            for e in ("INSERT","UPDATE","DELETE"):
+                if rest3.upper().startswith(e+" "):
+                    ev = e; break
+            if not ev:
+                raise ValueError("缺少事件 INSERT/UPDATE/DELETE")
+            rest4 = rest3[len(ev):].strip()
+            if not rest4.upper().startswith("ON "):
+                raise ValueError("缺少 ON 关键字")
+            rest5 = rest4[3:].strip()
+            table = rest5.split()[0]
+            # 解析 AS BEGIN ... END 块
+            as_pos = rest5.upper().find(" AS ")
+            if as_pos == -1:
+                raise ValueError("缺少 AS 块")
+            blk = rest5[as_pos+4:].strip()
+            if blk.upper().startswith("BEGIN"):
+                blk = blk[5:].strip()
+            if blk.upper().endswith("END"):
+                blk = blk[:-3].strip()
+            # 语句按分号切分
+            stmts = [x.strip() for x in blk.split(';') if x.strip()]
+            trig = {"name": name, "timing": timing, "event": ev, "statements": stmts}
+            self._triggers.setdefault(table, []).append(trig)
+            return {"affected_rows": 0, "metadata": {"message": f"触发器 '{name}' 已创建"}}
+        except Exception as e:
+            raise SQLSyntaxError(f"CREATE TRIGGER 解析失败: {e}")
+
+    def _handle_drop_trigger(self, sql: str) -> Dict[str, Any]:
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("DROP TRIGGER "):
+                raise ValueError("语法: DROP TRIGGER name ON table;")
+            rest = s[len("DROP TRIGGER "):].strip()
+            name = rest.split()[0]
+            rest2 = rest[len(name):].strip()
+            if not rest2.upper().startswith("ON "):
+                raise ValueError("缺少 ON 关键字")
+            table = rest2[3:].strip()
+            arr = self._triggers.get(table, [])
+            before = len(arr)
+            arr = [t for t in arr if t.get("name") != name]
+            self._triggers[table] = arr
+            msg = "触发器已删除" if len(arr) != before else "触发器不存在"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"DROP TRIGGER 解析失败: {e}")
+
+    def _handle_show_triggers(self) -> Dict[str, Any]:
+        rows = []
+        for table, lst in self._triggers.items():
+            for t in lst:
+                rows.append([t.get("name"), table, t.get("timing"), t.get("event")])
+        return {"affected_rows": len(rows), "data": rows, "metadata": {"columns": ["name","table","timing","event"]}}
+
+    def _fire_triggers(self, table: str, timing: str, event: str) -> None:
+        try:
+            for t in self._triggers.get(table, []) or []:
+                if t.get("timing") == timing and t.get("event") == event:
+                    for stmt in t.get("statements", []):
+                        try:
+                            self.execute(stmt)
+                        except Exception:
+                            # 触发器语句失败不影响主语句（简化）
+                            pass
+        except Exception:
+            pass
+
+    # === 物化视图 ===
+    def _handle_create_materialized_view(self, sql: str) -> Dict[str, Any]:
+        # 语法：CREATE MATERIALIZED VIEW name AS <SELECT ...>;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("CREATE MATERIALIZED VIEW "):
+                raise ValueError("语法: CREATE MATERIALIZED VIEW name AS <SELECT ...>;")
+            rest = s[len("CREATE MATERIALIZED VIEW "):].strip()
+            name = rest.split()[0]
+            as_pos = rest.upper().find(" AS ")
+            if as_pos == -1:
+                raise ValueError("缺少 AS")
+            select_sql = rest[as_pos+4:].strip()
+            phys = f"__mat_{name}"
+            # 创建物理表并填充
+            self._create_table_from_select(phys, select_sql)
+            self._mat_views[name] = {"sql": select_sql, "physical_table": phys}
+            return {"affected_rows": 0, "metadata": {"message": f"物化视图 '{name}' 已创建"}}
+        except Exception as e:
+            raise SQLSyntaxError(f"CREATE MATERIALIZED VIEW 解析失败: {e}")
+
+    def _handle_drop_materialized_view(self, sql: str) -> Dict[str, Any]:
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("DROP MATERIALIZED VIEW "):
+                raise ValueError("语法: DROP MATERIALIZED VIEW name;")
+            name = s[len("DROP MATERIALIZED VIEW "):].strip()
+            mv = self._mat_views.pop(name, None)
+            if mv:
+                try:
+                    self.execute(f"DROP TABLE {mv['physical_table']};")
+                except Exception:
+                    pass
+                msg = "物化视图已删除"
+            else:
+                msg = "物化视图不存在"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"DROP MATERIALIZED VIEW 解析失败: {e}")
+
+    def _handle_refresh_materialized_view(self, sql: str) -> Dict[str, Any]:
+        # 语法：REFRESH MATERIALIZED VIEW name;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("REFRESH MATERIALIZED VIEW "):
+                raise ValueError("语法: REFRESH MATERIALIZED VIEW name;")
+            name = s[len("REFRESH MATERIALIZED VIEW "):].strip()
+            mv = self._mat_views.get(name)
+            if not mv:
+                raise ExecutionError("物化视图不存在")
+            phys = mv["physical_table"]
+            # 先清空物理表（简化：DROP + 重新创建）
+            try:
+                self.execute(f"DROP TABLE {phys};")
+            except Exception:
+                pass
+            self._create_table_from_select(phys, mv["sql"])
+            return {"affected_rows": 0, "metadata": {"message": "物化视图已刷新"}}
+        except Exception as e:
+            raise ExecutionError(f"REFRESH MATERIALIZED VIEW 失败: {e}")
+
+    def _create_table_from_select(self, table: str, select_sql: str) -> None:
+        # 执行 select，使用返回的列构建表并插入数据
+        res = self.execute(select_sql)
+        cols = res.get("metadata", {}).get("columns", []) or []
+        if not cols:
+            raise ExecutionError("无法解析物化视图列")
+        col_defs = ', '.join(f"{c} STRING" for c in cols)  # 简化全部为 STRING
+        self.execute(f"CREATE TABLE {table} ({col_defs});")
+        for row in res.get("data", []) or []:
+            vals = ', '.join([f"'{str(v)}'" for v in row])
+            self.execute(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({vals});")
+
+    # === 存储过程/控制流（简化） ===
+    def _handle_create_procedure(self, sql: str) -> Dict[str, Any]:
+        # 语法：CREATE PROCEDURE name AS BEGIN stmt1; stmt2; END;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("CREATE PROCEDURE "):
+                raise ValueError("语法: CREATE PROCEDURE name AS BEGIN ... END;")
+            rest = s[len("CREATE PROCEDURE "):].strip()
+            name = rest.split()[0]
+            as_pos = rest.upper().find(" AS ")
+            blk = rest[as_pos+4:].strip()
+            if blk.upper().startswith("BEGIN"):
+                blk = blk[5:].strip()
+            if blk.upper().endswith("END"):
+                blk = blk[:-3].strip()
+            stmts = [x.strip() for x in blk.split(';') if x.strip()]
+            self._procedures[name] = {"statements": stmts}
+            return {"affected_rows": 0, "metadata": {"message": f"过程 '{name}' 已创建"}}
+        except Exception as e:
+            raise SQLSyntaxError(f"CREATE PROCEDURE 解析失败: {e}")
+
+    def _handle_drop_procedure(self, sql: str) -> Dict[str, Any]:
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("DROP PROCEDURE "):
+                raise ValueError("语法: DROP PROCEDURE name;")
+            name = s[len("DROP PROCEDURE "):].strip()
+            existed = name in self._procedures
+            self._procedures.pop(name, None)
+            msg = "过程已删除" if existed else "过程不存在"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"DROP PROCEDURE 解析失败: {e}")
+
+    def _handle_call(self, sql: str) -> Dict[str, Any]:
+        # 语法：CALL name;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("CALL "):
+                raise ValueError("语法: CALL name;")
+            name = s[5:].strip()
+            proc = self._procedures.get(name)
+            if not proc:
+                raise ExecutionError("过程不存在")
+            for stmt in proc.get("statements", []):
+                self.execute(stmt)
+            return {"affected_rows": 0, "metadata": {"message": f"过程 '{name}' 已执行"}}
+        except Exception as e:
+            raise ExecutionError(f"CALL 失败: {e}")
+
+    # === 视图（非物化） ===
+    def _handle_create_view(self, sql: str) -> Dict[str, Any]:
+        # 语法（简化）：CREATE VIEW view_name AS <SELECT ...>;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("CREATE VIEW "):
+                raise ValueError("语法: CREATE VIEW name AS <SELECT ...>;")
+            as_pos = up.find(" AS ")
+            if as_pos == -1:
+                raise ValueError("缺少 AS 关键字")
+            view_name = s[len("CREATE VIEW "):as_pos].strip()
+            select_sql = s[as_pos + 4:].strip()
+            if not select_sql.upper().startswith("SELECT "):
+                raise ValueError("仅支持 SELECT 视图定义")
+            self._views[view_name] = {"sql": select_sql}
+            return {"affected_rows": 0, "metadata": {"message": f"视图 '{view_name}' 已创建"}}
+        except Exception as e:
+            raise SQLSyntaxError(f"CREATE VIEW 解析失败: {e}")
+
+    def _handle_drop_view(self, sql: str) -> Dict[str, Any]:
+        # 语法：DROP VIEW view_name;
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("DROP VIEW "):
+                raise ValueError("语法: DROP VIEW name;")
+            view_name = s[len("DROP VIEW "):].strip()
+            existed = view_name in self._views
+            if existed:
+                self._views.pop(view_name, None)
+            msg = "视图已删除" if existed else "视图不存在"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise SQLSyntaxError(f"DROP VIEW 解析失败: {e}")
+
+    def _try_execute_view_select(self, sql: str) -> Optional[Dict[str, Any]]:
+        """检测并重写简单形态: SELECT <cols> FROM <view>; （不含额外 WHERE/JOIN）"""
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        if not up.startswith("SELECT "):
+            return None
+        # 仅支持单 FROM 的简单模式
+        try:
+            # 粗略解析: SELECT ... FROM <ident> [;]
+            if " FROM " not in up:
+                return None
+            sel_part, from_part = s.split(" FROM ", 1)
+            # 去除尾部
+            rest = from_part.strip()
+            # 如果包含空格或进一步关键字，认为是复杂查询，交由编译器
+            # 我们只支持 "<view_name>" 或 "<view_name>;"
+            view_name = rest.split()[0].strip().rstrip(';')
+            if view_name not in self._views:
+                return None
+            inner_sql = self._views[view_name]["sql"]
+            # 如果用户选择的列是 * 则直接执行视图 SQL；否则对结果做列投影
+            proj = sel_part[len("SELECT "):].strip()
+            # 执行视图 SQL
+            res = self.execute(inner_sql)
+            if not proj or proj == "*":
+                return res
+            # 进行简单列投影
+            data = res.get("data", [])
+            columns = res.get("metadata", {}).get("columns", [])
+            want_cols = [c.strip() for c in proj.split(',') if c.strip()]
+            col_indices = []
+            for c in want_cols:
+                try:
+                    idx = columns.index(c)
+                except Exception:
+                    raise ExecutionError(f"视图列不存在: {c}")
+                col_indices.append(idx)
+            new_rows = [[row[i] for i in col_indices] for row in data]
+            return {"affected_rows": len(new_rows), "data": new_rows, "metadata": {"columns": want_cols}}
+        except ExecutionError:
+            raise
+        except Exception:
+            return None
+
+    # === 约束处理 ===
+    def _preprocess_create_table_constraints(self, sql: str) -> str:
+        """在不修改编译器的前提下，粗略解析 CREATE TABLE 中的 PRIMARY KEY/UNIQUE/FOREIGN KEY，
+        记录到适配器元数据，并从 SQL 中移除这些约束片段，以适配现有编译器不支持约束的限制。
+        仅支持列级与简单表级 PRIMARY KEY/UNIQUE，FOREIGN KEY 仅登记元数据，不做执行时强制。"""
+        s = sql.strip()
+        up = s.upper()
+        try:
+            # 提取表名与括号内定义
+            head = up[len("CREATE TABLE "):]
+            table = head.split('(')[0].strip()
+            body = s[s.find('(')+1:s.rfind(')')]
+            parts = [p.strip() for p in body.split(',')]
+            new_parts: List[str] = []
+            uniques: List[str] = []
+            pk_col: Optional[str] = None
+            fks: List[Dict[str, str]] = []
+            for p in parts:
+                pu = p.upper()
+                # 表级 PRIMARY KEY (col)
+                if pu.startswith("PRIMARY KEY"):
+                    try:
+                        col = p[p.find('(')+1:p.rfind(')')].strip()
+                        pk_col = col
+                    except Exception:
+                        pass
+                    continue
+                # 表级 UNIQUE (col)
+                if pu.startswith("UNIQUE") and '(' in p and ')' in p:
+                    try:
+                        col = p[p.find('(')+1:p.rfind(')')].strip()
+                        uniques.append(col)
+                    except Exception:
+                        pass
+                    continue
+                # FOREIGN KEY (col) REFERENCES ref_table(ref_col)
+                if pu.startswith("FOREIGN KEY") or pu.startswith("CONSTRAINT ") and " FOREIGN KEY " in pu:
+                    try:
+                        seg = p
+                        # 获取本列
+                        col = seg[seg.find('(')+1:seg.find(')')].strip()
+                        ref_pos = seg.upper().find("REFERENCES ")
+                        ref_seg = seg[ref_pos+11:].strip()
+                        ref_table = ref_seg.split('(')[0].strip()
+                        ref_col = ref_seg[ref_seg.find('(')+1:ref_seg.find(')')].strip()
+                        fks.append({"column": col, "ref_table": ref_table, "ref_column": ref_col})
+                    except Exception:
+                        pass
+                    continue
+                # 列级 PRIMARY KEY/UNIQUE: col TYPE PRIMARY KEY / UNIQUE
+                if (" PRIMARY KEY" in pu) or (" UNIQUE" in pu):
+                    toks = pu.split()
+                    if " PRIMARY" in pu:
+                        # 取列名为首个 token
+                        try:
+                            colname = p.split()[0]
+                            pk_col = colname
+                        except Exception:
+                            pass
+                    if " UNIQUE" in pu:
+                        try:
+                            colname = p.split()[0]
+                            uniques.append(colname)
+                        except Exception:
+                            pass
+                    # 去掉约束关键词，保留列名与类型
+                    base = p.split()[0:2]
+                    new_parts.append(' '.join(base))
+                    continue
+                # 普通列定义
+                new_parts.append(p)
+
+            # 记录元数据
+            if pk_col:
+                self._primary_key[table] = pk_col
+            if uniques:
+                self._unique_cols[table] = list(dict.fromkeys(uniques))
+            if fks:
+                self._foreign_keys[table] = fks
+
+            # 组装去约束后的 SQL
+            new_body = ', '.join(new_parts)
+            return f"CREATE TABLE {table} ({new_body});"
+        except Exception:
+            return sql
+
     def _execute_with_index_optimization(self, executor_plan: Dict[str, Any]) -> Dict[str, Any]:
         # 对 SELECT 的等值/范围过滤进行索引优化
         try:
+            # 触发器钩子：行级 BEFORE/AFTER
+            if executor_plan.get("type") in ("INSERT","UPDATE","DELETE"):
+                table = executor_plan.get("table")
+                if table:
+                    self._fire_triggers(table, timing="BEFORE", event=executor_plan.get("type"))
             if executor_plan.get("type") == "SELECT":
                 table = executor_plan.get("table", "")
                 flt = executor_plan.get("filter") or []
@@ -815,6 +1272,10 @@ class SQLCompilerAdapter:
                         except Exception:
                             pass
             res = self.hybrid_executor.execute(executor_plan)
+            if executor_plan.get("type") in ("INSERT","UPDATE","DELETE"):
+                table = executor_plan.get("table")
+                if table:
+                    self._fire_triggers(table, timing="AFTER", event=executor_plan.get("type"))
             # 钩子：INSERT 后更新索引（仅非事务立即生效；事务内在 COMMIT 时做批量）
             if executor_plan.get("type") == "INSERT" and not self.in_transaction:
                 try:
