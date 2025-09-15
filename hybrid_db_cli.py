@@ -58,7 +58,7 @@ class SQLCompleter(Completer):
             'LIMIT', 'OFFSET', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'AS',
             'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'ASC', 'DESC',
             'BEGIN', 'COMMIT', 'ROLLBACK', 'TRANSACTION', 'AUTOCOMMIT',
-            'EXPLAIN', 'SHOW', 'EXPORT', 'TO', 'PATH', 'CSV', 'JSON'
+            'EXPLAIN', 'SHOW', 'EXPORT', 'TO', 'PATH', 'CSV', 'JSON', 'IMPORT'
         ]
         
         # 系统命令
@@ -114,7 +114,11 @@ class SQLCompleter(Completer):
             text.startswith('CACHE') or text.startswith('MODE') or
             text.startswith('SHOW') or text.startswith('SET')):
             return 'system'
-        
+
+        # 导入命令上下文
+        if text.startswith('IMPORT TABLE'):
+            return 'import'
+
         # 表名上下文 (FROM, JOIN, INTO等后面)
         if any(keyword in text for keyword in ['FROM ', 'JOIN ', 'INTO ', 'UPDATE ', 'TABLE ']):
             return 'table'
@@ -461,6 +465,11 @@ class HybridDatabaseCLI:
                         self._handle_export_command(line)
                         continue
 
+                    # 检查是否是导入命令
+                    if line.upper().startswith("IMPORT TABLE"):
+                        self._handle_import_command(line)
+                        continue
+
                     if not line and not sql_lines:
                         continue
                     
@@ -697,6 +706,7 @@ class HybridDatabaseCLI:
   CREATE INDEX idx ON table(col) PK pkcol;  - 创建二级索引
   DROP INDEX table(col);                     - 删除索引
   SHOW INDEXES                               - 查看所有索引
+  SHOW TRIGGERS                              - 查看所有触发器
   exit       - 退出程序
 
 📝 SQL语句支持:
@@ -709,10 +719,38 @@ class HybridDatabaseCLI:
   SELECT ... FROM table1 JOIN table2 ON col1=col2        - 表连接
   SELECT ... FROM table ORDER BY col [ASC/DESC]          - 排序查询
   SELECT ... FROM table GROUP BY col                     - 分组查询
-  EXPORT TABLE table_name TO format PATH 'file_path'    - 导出数据
+  EXPORT TABLE table_name TO format PATH 'file_path'     - 导出数据
+  IMPORT TABLE table_name FROM format PATH 'file_path'   - 从文件导入数据
+
+📚 视图/物化视图/触发器/过程:
+  -- 视图（非物化）：
+  CREATE VIEW v AS SELECT col1, col2 FROM t;
+  SELECT * FROM v;               -- 支持 * 与指定列
+  DROP VIEW v;
+
+  -- 物化视图（以物理表存储，需刷新）：
+  CREATE MATERIALIZED VIEW mv AS SELECT col1 FROM t;
+  REFRESH MATERIALIZED VIEW mv;  -- 全量刷新
+  DROP MATERIALIZED VIEW mv;
+
+  -- 触发器（行级 BEFORE/AFTER INSERT/UPDATE/DELETE）：
+  CREATE TRIGGER trg BEFORE INSERT ON t AS BEGIN
+    -- 这里写多条语句，每条以分号结束
+    INSERT INTO audit(id) VALUES (1);
+  END;
+  SHOW TRIGGERS;
+  DROP TRIGGER trg ON t;
+
+  -- 存储过程（适配器内解释执行）：
+  CREATE PROCEDURE p AS BEGIN
+    INSERT INTO t(id,name) VALUES (10,'x');
+  END;
+  CALL p;
+  DROP PROCEDURE p;
 
 🔎 索引命令:
   CREATE INDEX idx ON table(col) PK pkcol;               - 创建单列二级索引
+  CREATE INDEX idx ON table(col) USING HASH PK pkcol;    - 指定索引策略(HASH/BTREE)
   CREATE COMPOSITE INDEX idx ON table(col1,col2);        - 创建复合索引（内存雏形）
   DROP INDEX table(col);                                 - 删除索引
   DROP COMPOSITE INDEX ON table;                         - 删除复合索引
@@ -741,9 +779,13 @@ class HybridDatabaseCLI:
   STRING  - 字符串
   DOUBLE  - 浮点数
   
+📥 支持的导入格式:
+  csv     - 逗号分隔值文件
+  json    - JSON数据文件
+  
 📤 支持的导出格式:
-  csv  - 逗号分隔值文件
-  json - JSON数据文件
+  csv     - 逗号分隔值文件
+  json    - JSON数据文件
   
 ⚠️  语法限制 (适配 modules/sql_compiler):
   - 不支持 PRIMARY KEY 语法
@@ -761,6 +803,8 @@ class HybridDatabaseCLI:
   DROP TABLE students;
   EXPORT TABLE students TO csv PATH 'students.csv';
   EXPORT TABLE students TO json PATH 'students.json';
+  IMPORT TABLE students FROM csv PATH 'studentstest1.csv';
+  IMPORT TABLE students FROM json PATH 'studentstest2.json';
   
   -- 高级查询示例:
   SELECT s.name, c.course FROM students s JOIN courses c ON s.id = c.student_id;
@@ -943,6 +987,67 @@ class HybridDatabaseCLI:
     json - JSON数据文件
         """
         print(help_text)
+
+    def _handle_import_command(self, command: str):
+        """处理导入命令: IMPORT TABLE table_name FROM format PATH 'path'"""
+        try:
+            # 移除末尾的分号（如果存在）
+            if command.endswith(';'):
+                command = command[:-1].strip()
+
+            parts = command.split()
+            if len(parts) >= 7 and parts[0].upper() == "IMPORT" and parts[1].upper() == "TABLE":
+                table_name = parts[2]
+                if parts[3].upper() != "FROM":
+                    raise ValueError("缺少 FROM 关键字")
+
+                format_type = parts[4].lower()
+                if parts[5].upper() != "PATH":
+                    raise ValueError("缺少 PATH 关键字")
+
+                # 处理路径（可能包含空格，需要合并）
+                path_parts = parts[6:]
+                path = ' '.join(path_parts).strip("'\"")
+
+                # 移除路径中可能的分号
+                if path.endswith(';'):
+                    path = path[:-1]
+
+                # 调用导入方法
+                success = self.adapter.import_table(table_name, format_type, path)
+                if success:
+                    print(f"✓ 导入成功: {path} → {table_name}")
+                else:
+                    print("❌ 导入失败")
+            else:
+                print("❌ 导入命令格式错误")
+                self._show_import_help()
+
+        except Exception as e:
+            print(f"❌ 导入命令解析错误: {str(e)}")
+            self._show_import_help()
+
+    def _show_import_help(self):
+        """显示导入帮助信息"""
+        help_text = """
+    📥 数据导入命令格式:
+        IMPORT TABLE table_name FROM format PATH 'file_path'
+    
+    💡 示例:
+        IMPORT TABLE students FROM csv PATH 'data/students.csv'
+        IMPORT TABLE employees FROM json PATH 'exports/employees.json'
+    
+    📊 支持的导入格式:
+        csv  - 逗号分隔值文件
+        json - JSON数据文件
+    
+    ⚠️  注意:
+        - CSV文件第一行应为列名
+        - 表会自动创建（如果不存在）
+        - 数据类型会自动推断
+        """
+        print(help_text)
+
 
 def main():
     """主函数"""

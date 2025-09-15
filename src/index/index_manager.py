@@ -18,14 +18,17 @@ class IndexManager:
         self._pk_column_of_index: Dict[tuple, str] = {}
         # 维护每个索引的已排序键列表（用于范围查询，简易实现）
         self._sorted_keys: Dict[tuple, List[str]] = {}
+        # 记录索引策略（USING BTREE/HASH 等），仅保存元数据
+        self._strategy: Dict[tuple, str] = {}
 
-    def create_index(self, table: str, column: str, pk_column: str) -> bool:
+    def create_index(self, table: str, column: str, pk_column: str, strategy: str = "BTREE") -> bool:
         key = (table, column)
         if key in self._indexes:
             return False
         self._indexes[key] = defaultdict(list)
         self._pk_column_of_index[key] = pk_column
         self._sorted_keys[key] = []
+        self._strategy[key] = (strategy or "BTREE").upper()
         return True
 
     def drop_index(self, table: str, column: str) -> bool:
@@ -34,6 +37,7 @@ class IndexManager:
         self._indexes.pop(key, None)
         self._pk_column_of_index.pop(key, None)
         self._sorted_keys.pop(key, None)
+        self._strategy.pop(key, None)
         return existed
 
     def has_index(self, table: str, column: str) -> bool:
@@ -42,7 +46,12 @@ class IndexManager:
     def get_indexes(self) -> List[dict]:
         out = []
         for (t, c), pkc in self._pk_column_of_index.items():
-            out.append({"table": t, "column": c, "pk_column": pkc})
+            out.append({
+                "table": t,
+                "column": c,
+                "pk_column": pkc,
+                "strategy": self._strategy.get((t, c), "BTREE")
+            })
         return out
 
     def on_insert(self, table: str, row_values: List[str], column_names: List[str]):
