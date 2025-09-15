@@ -378,12 +378,88 @@ class HybridExecutionEngine:
 
     def _execute_delete(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         table_name = plan["table"]
+        # 兼容多种 where 表达：字符串 plan['where']，或列表/字典在 plan['where_clause']
         where_clause = plan.get("where")
+        wc_list = None
+        if where_clause is None:
+            wc_list = plan.get("where_clause")
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
         if table_name not in self.table_columns:
             raise CatalogError(f"表 '{table_name}' 不存在")
-        predicate = self._build_predicate(table_name, where_clause)
+        # 构建谓词（参考 _execute_update 中的处理）
+        if isinstance(where_clause, str) and where_clause:
+            predicate = self._build_predicate(table_name, where_clause)
+        elif isinstance(wc_list, list) and wc_list:
+            cols = self.table_columns.get(table_name, [])
+            def make_pred(conds, cols_names):
+                def eval_num(lhs: str, op: str, rhs: str) -> bool:
+                    try:
+                        ln = float(lhs); rn = float(rhs)
+                        if op == "=": return ln == rn
+                        if op == ">": return ln > rn
+                        if op == "<": return ln < rn
+                        if op == ">=": return ln >= rn
+                        if op == "<=": return ln <= rn
+                        if op == "!=": return ln != rn
+                        return False
+                    except Exception:
+                        if op == "=": return lhs == rhs
+                        if op == ">": return lhs > rhs
+                        if op == "<": return lhs < rhs
+                        if op == ">=": return lhs >= rhs
+                        if op == "<=": return lhs <= rhs
+                        if op == "!=": return lhs != rhs
+                        return False
+                idx_ops_vals = []
+                for c in conds:
+                    col = str(c.get("column",""))
+                    op = str(c.get("op","=")).upper()
+                    val = str(c.get("value",""))
+                    try:
+                        idx = cols_names.index(col)
+                        idx_ops_vals.append((idx, op, val))
+                    except ValueError:
+                        idx_ops_vals.append((-1, op, val))
+                def pred(x):
+                    for i,op,v in idx_ops_vals:
+                        if i < 0 or i >= len(x):
+                            return False
+                        # 数值/字符串比较
+                        try:
+                            ln = float(str(x[i])); rn = float(v)
+                            if op == "=":
+                                ok = ln == rn
+                            elif op == ">":
+                                ok = ln > rn
+                            elif op == "<":
+                                ok = ln < rn
+                            elif op == ">=":
+                                ok = ln >= rn
+                            elif op == "<=":
+                                ok = ln <= rn
+                            elif op == "!=":
+                                ok = ln != rn
+                            else:
+                                ok = False
+                        except Exception:
+                            li = str(x[i])
+                            if op == "=": ok = li == v
+                            elif op == ">": ok = li > v
+                            elif op == "<": ok = li < v
+                            elif op == ">=": ok = li >= v
+                            elif op == "<=": ok = li <= v
+                            elif op == "!=": ok = li != v
+                            else: ok = False
+                        if not ok:
+                            return False
+                    return True
+                return pred
+            predicate = make_pred(wc_list, cols)
+        else:
+            # 无 where 时，不做全表删除的危险操作，返回0行受影响
+            def predicate(_x):
+                return False
         # 简化：逐行扫描找主键以维护索引与记录 WAL
         txid = self._current_txid or self._txm.begin().txid
         is_implicit_tx = self._current_txid is None
@@ -546,17 +622,12 @@ class HybridExecutionEngine:
         self._wal.append(LogRecord(txid=txid, op="UPDATE", table=table_name, payload={"set": set_pairs, "where": where_clause or wc_list}))
 
         updated_count = 0
-        # 尝试底层批量 UPDATE（可能忽略 set/where 结构差异）
-        try:
-            updated_count = int(self.executor.update_rows(table_name, set_pairs, predicate))
-        except Exception:
-            updated_count = 0
+        col_names = self.table_columns.get(table_name, [])
+        pk_col = self._get_pk_column(table_name)
 
-        # 如无更新，做回退：按谓词扫描 -> 基于主键删除再插入新行
-        if updated_count == 0 and set_pairs:
-            col_names = self.table_columns.get(table_name, [])
-            pk_col = self._get_pk_column(table_name)
+        if set_pairs:
             if pk_col and pk_col in col_names:
+                # 确认有主键列：总是采用“删后插”以避免底层 update_rows 出现重复
                 pk_idx = col_names.index(pk_col)
                 affected = 0
                 for r in self.executor.seq_scan(table_name):
@@ -573,12 +644,13 @@ class HybridExecutionEngine:
                             new_vals[cidx] = str(v)
                         except ValueError:
                             continue
-                    # 物化更新：先按 PK 删除，再插入
+                    # 按 PK 删除原行
                     pkv = str(vals[pk_idx]) if pk_idx < len(vals) else ""
                     try:
                         self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
                     except Exception:
                         pass
+                    # 插入新行
                     ok = False
                     try:
                         ok = bool(self.executor.insert(table_name, new_vals))
@@ -593,6 +665,12 @@ class HybridExecutionEngine:
                         except Exception:
                             pass
                 updated_count = affected
+            else:
+                # 无法确定主键时，退回到底层批量更新
+                try:
+                    updated_count = int(self.executor.update_rows(table_name, set_pairs, predicate))
+                except Exception:
+                    updated_count = 0
 
         if is_implicit_tx:
             self._txm.commit(txid)

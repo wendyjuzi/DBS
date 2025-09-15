@@ -1987,6 +1987,217 @@ DELETE FROM students WHERE id = 3;
         self.log_text.see(tk.END)  # 滚动到底部
         self.root.update_idletasks()  # 更新界面
 
+    def explain_sql(self):
+        """对当前输入执行 EXPLAIN（adapter 支持；core 提示不支持）"""
+        sql = self.sql_text.get(1.0, tk.END).strip()
+        if not sql:
+            messagebox.showwarning("警告", "请输入SQL语句以进行 EXPLAIN")
+            return
+        stmt = "EXPLAIN " + (sql if sql.endswith(';') else sql + ';')
+        self.log("EXPLAIN 当前SQL")
+        try:
+            if self.current_mode == "adapter":
+                res = self.adapter.execute(stmt)
+            else:
+                res = {"status":"error","error":"EXPLAIN 在 CORE 模式不支持，请切换 MODE ADAPTER","affected_rows":0,"data":[]}
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.result_text.insert(tk.END, f"执行错误: {e}\n\n")
+            try:
+                self.result_text.insert(tk.END, "💡 智能建议：\n" + self._suggest_fixes(sql, str(e)))
+            except Exception:
+                pass
+
+    # ===== 事务相关 =====
+    def tx_begin(self):
+        try:
+            if self.current_mode != "adapter":
+                self.display_result({"status":"error","error":"BEGIN 仅在 ADAPTER 模式支持","affected_rows":0}, 0.0)
+                return
+            res = self.adapter.execute("BEGIN;")
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.display_result({"status":"error","error":str(e),"affected_rows":0}, 0.0)
+
+    def tx_commit(self):
+        try:
+            if self.current_mode != "adapter":
+                self.display_result({"status":"error","error":"COMMIT 仅在 ADAPTER 模式支持","affected_rows":0}, 0.0)
+                return
+            res = self.adapter.execute("COMMIT;")
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.display_result({"status":"error","error":str(e),"affected_rows":0}, 0.0)
+
+    def tx_rollback(self):
+        try:
+            if self.current_mode != "adapter":
+                self.display_result({"status":"error","error":"ROLLBACK 仅在 ADAPTER 模式支持","affected_rows":0}, 0.0)
+                return
+            res = self.adapter.execute("ROLLBACK;")
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.display_result({"status":"error","error":str(e),"affected_rows":0}, 0.0)
+
+    def set_autocommit(self, enabled: bool):
+        try:
+            if self.current_mode != "adapter":
+                self.display_result({"status":"error","error":"SET AUTOCOMMIT 仅在 ADAPTER 模式支持","affected_rows":0}, 0.0)
+                return
+            stmt = "SET AUTOCOMMIT ON;" if enabled else "SET AUTOCOMMIT OFF;"
+            res = self.adapter.execute(stmt)
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.display_result({"status":"error","error":str(e),"affected_rows":0}, 0.0)
+
+    def show_transaction(self):
+        try:
+            if self.current_mode != "adapter":
+                self.display_result({"status":"error","error":"SHOW TRANSACTION 仅在 ADAPTER 模式支持","affected_rows":0}, 0.0)
+                return
+            res = self.adapter.execute("SHOW TRANSACTION;")
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.display_result({"status":"error","error":str(e),"affected_rows":0}, 0.0)
+
+    def show_overlay(self):
+        try:
+            if self.current_mode != "adapter":
+                self.display_result({"status":"error","error":"SHOW OVERLAY 仅在 ADAPTER 模式支持","affected_rows":0}, 0.0)
+                return
+            res = self.adapter.execute("SHOW OVERLAY;")
+            self.display_result(res, 0.0)
+        except Exception as e:
+            self.display_result({"status":"error","error":str(e),"affected_rows":0}, 0.0)
+
+    # ===== 数据导入/导出 =====
+    def import_table_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("导入表")
+        ttk.Label(win, text="表名:").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
+        table_var = tk.StringVar()
+        ttk.Entry(win, textvariable=table_var, width=28).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(win, text="格式:").grid(row=1, column=0, padx=6, pady=6, sticky=tk.W)
+        fmt_var = tk.StringVar(value="csv")
+        ttk.Combobox(win, textvariable=fmt_var, values=["csv", "json"], state="readonly", width=10).grid(row=1, column=1, padx=6, pady=6, sticky=tk.W)
+        ttk.Label(win, text="文件路径:").grid(row=2, column=0, padx=6, pady=6, sticky=tk.W)
+        path_var = tk.StringVar()
+        ttk.Entry(win, textvariable=path_var, width=28).grid(row=2, column=1, padx=6, pady=6)
+        def choose_file():
+            fname = filedialog.askopenfilename(filetypes=[("CSV","*.csv"),("JSON","*.json"),("所有文件","*.*")])
+            if fname:
+                path_var.set(fname)
+        ttk.Button(win, text="选择...", command=choose_file).grid(row=2, column=2, padx=6, pady=6)
+        def do_import():
+            table = table_var.get().strip()
+            fmt = fmt_var.get().strip().lower()
+            path = path_var.get().strip()
+            if not table or not path:
+                messagebox.showwarning("警告", "请填写表名与文件路径")
+                return
+            sql = f"IMPORT TABLE {table} FROM {fmt} PATH '{path}';"
+            self._exec_and_display(sql)
+            win.destroy()
+        ttk.Button(win, text="导入", command=do_import).grid(row=3, column=1, padx=6, pady=12, sticky=tk.W)
+
+    def export_table_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("导出表")
+        ttk.Label(win, text="表名:").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
+        table_var = tk.StringVar()
+        ttk.Entry(win, textvariable=table_var, width=28).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(win, text="格式:").grid(row=1, column=0, padx=6, pady=6, sticky=tk.W)
+        fmt_var = tk.StringVar(value="csv")
+        ttk.Combobox(win, textvariable=fmt_var, values=["csv", "json"], state="readonly", width=10).grid(row=1, column=1, padx=6, pady=6, sticky=tk.W)
+        ttk.Label(win, text="保存路径:").grid(row=2, column=0, padx=6, pady=6, sticky=tk.W)
+        path_var = tk.StringVar()
+        ttk.Entry(win, textvariable=path_var, width=28).grid(row=2, column=1, padx=6, pady=6)
+        def choose_file():
+            defext = ".csv" if fmt_var.get().lower()=="csv" else ".json"
+            fname = filedialog.asksaveasfilename(defaultextension=defext, filetypes=[("CSV","*.csv"),("JSON","*.json"),("所有文件","*.*")])
+            if fname:
+                path_var.set(fname)
+        ttk.Button(win, text="选择...", command=choose_file).grid(row=2, column=2, padx=6, pady=6)
+        def do_export():
+            table = table_var.get().strip()
+            fmt = fmt_var.get().strip().lower()
+            path = path_var.get().strip()
+            if not table or not path:
+                messagebox.showwarning("警告", "请填写表名与保存路径")
+                return
+            sql = f"EXPORT TABLE {table} TO {fmt} PATH '{path}';"
+            self._exec_and_display(sql)
+            win.destroy()
+        ttk.Button(win, text="导出", command=do_export).grid(row=3, column=1, padx=6, pady=12, sticky=tk.W)
+
+    # ===== 通用执行与建议 =====
+    def _exec_and_display(self, sql: str):
+        try:
+            if self.current_mode == "adapter":
+                up = sql.strip().upper()
+                if up.startswith("EXPORT TABLE"):
+                    self._handle_export_command(sql)
+                    self.display_result({"status":"success","metadata":{"message":"导出完成"},"affected_rows":0}, 0.0)
+                    return
+                if up.startswith("IMPORT TABLE"):
+                    self._handle_import_command(sql)
+                    self.display_result({"status":"success","metadata":{"message":"导入完成"},"affected_rows":0}, 0.0)
+                    return
+                res = self.adapter.execute(sql)
+            else:
+                res = {"status":"error","error":"该命令在 CORE 模式不支持，请切换 MODE ADAPTER","affected_rows":0}
+            self.display_result(res, 0.0)
+            self.update_monitors()
+        except Exception as e:
+            self.result_text.insert(tk.END, f"执行错误: {e}\n")
+            try:
+                self.result_text.insert(tk.END, "\n💡 智能建议：\n" + self._suggest_fixes(sql, str(e)))
+            except Exception:
+                pass
+
+    def _handle_export_command(self, sql: str):
+        # 直接转发给适配器，适配器内部处理导出
+        if self.adapter:
+            self.adapter.execute(sql)
+
+    def _handle_import_command(self, sql: str):
+        # 直接转发给适配器，适配器内部处理导入
+        if self.adapter:
+            self.adapter.execute(sql)
+
+    def _suggest_fixes(self, sql: str, error: str) -> str:
+        tips = []
+        up = sql.strip().upper()
+        if "IF EXISTS" in up or "IF NOT EXISTS" in up:
+            tips.append("移除 IF EXISTS/IF NOT EXISTS，当前语法不支持")
+        if up.count(';') > 1:
+            tips.append("一次仅执行一条语句；GUI 已按分号拆分逐条执行")
+        if up.startswith("DROP MATERIALIZED VIEW"):
+            tips.append("物化视图相关操作请使用菜单或单条命令")
+        if "表不存在" in error or "SemanticError 表不存在" in error:
+            tips.append("执行 'SYNC CATALOG;' 或点击 顶部-刷新状态，再试")
+        if up.startswith("EXPLAIN ") and self.current_mode == "core":
+            tips.append("EXPLAIN 在 CORE 模式不支持，切换到 adapter")
+        if not tips:
+            return "(无进一步建议)"
+        return "\n".join(f"- {t}" for t in tips)
+
+    def _format_table_text(self, columns, rows) -> str:
+        if not columns:
+            return str(rows)
+        widths = [len(str(c)) for c in columns]
+        for r in rows:
+            for i, v in enumerate(r):
+                if i < len(widths):
+                    widths[i] = min(max(widths[i], len(str(v))), 40)
+        header = " | ".join(str(columns[i]).ljust(widths[i]) for i in range(len(columns)))
+        sep = "-" * len(header)
+        lines = [header, sep]
+        for r in rows:
+            line = " | ".join((str(r[i]) if i < len(r) else '').ljust(widths[i]) for i in range(len(columns)))
+            lines.append(line)
+        return "\n".join(lines) + "\n"
+
     def run(self):
         """运行GUI"""
         self.log("数据库GUI启动完成")
