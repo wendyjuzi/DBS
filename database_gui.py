@@ -642,7 +642,14 @@ CreateTableStatement
                             self.semantic_result.insert(tk.END, f"✅ [OK] 语义检查通过\n")
 
                     except Exception as e:
-                        self.semantic_result.insert(tk.END, f"❌ 语义检查失败: {e}\n")
+                        err_text = str(e)
+                        self.semantic_result.insert(tk.END, f"❌ 语义检查失败: {err_text}\n")
+                        # 将同样的智能建议与错误摘要输出到左侧“执行结果”区域
+                        try:
+                            # 标准三元组在消息第一行，直接复用整段文本
+                            self.result_text.insert(tk.END, f"❌ 语义检查失败: {err_text}\n")
+                        except Exception:
+                            pass
                         semantic_errors += 1
 
                 if semantic_errors == 0:
