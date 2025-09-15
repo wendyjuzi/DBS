@@ -62,6 +62,7 @@ class SmartErrorDiagnostic:
     def __init__(self):
         # 常见拼写错误映射
         self.common_misspellings = {
+            'SELEC': 'SELECT',  # 缺少最后一个字母
             'SELCT': 'SELECT',
             'SLECT': 'SELECT',
             'SELLECT': 'SELECT',
@@ -275,13 +276,31 @@ class SmartErrorDiagnostic:
                         example=f"建议: {match}"
                     ))
         
-        # 分析缺少的分号
-        if "expected DELIMITER" in error_msg or "expected ;" in error_msg.lower():
+        # 统一大小写，便于匹配
+        error_msg_lower = error_msg.lower() if isinstance(error_msg, str) else str(error_msg).lower()
+        expected_lower = expected.lower() if isinstance(expected, str) else ""
+        got_upper = got.upper() if isinstance(got, str) else str(got).upper()
+
+        # 分析缺少的分号（大小写不敏感）
+        if ("expected delimiter" in error_msg_lower or
+            "expected ;" in error_msg_lower or
+            "expected ';'" in error_msg_lower or
+            "delimiter" in expected_lower):
             suggestions.append(ErrorSuggestion(
                 suggestion="SQL语句结尾缺少分号 (;)",
                 confidence=0.95,
                 fix_type="missing_semicolon",
                 example="在语句末尾添加 ;"
+            ))
+
+        # 针对 SELECT 列表后直接跟表名的常见错误：缺少 FROM
+        # 典型报错：Expected delimiter ';' but got 'students'
+        if "expected delimiter" in error_msg_lower and got_upper and got_upper.isidentifier():
+            suggestions.append(ErrorSuggestion(
+                suggestion="可能缺少关键字 'FROM'（列列表与表名之间）",
+                confidence=0.85,
+                fix_type="missing_from_clause",
+                example="正确示例: SELECT col1, col2 FROM table_name;"
             ))
 
         # 分析意外的输入结束
@@ -728,7 +747,7 @@ class SmartErrorDiagnostic:
 
         return DiagnosticResult(
             error_type="SemanticError",
-            message=self._enhance_error_message(message, suggestions),
+            message=self._prepend_structured_triplet(error_type, position, message) + "\n" + self._enhance_error_message(message, suggestions),
             line=0,  # 语义错误通常没有具体行号
             column=0,
             severity=ErrorSeverity.ERROR,
@@ -738,7 +757,8 @@ class SmartErrorDiagnostic:
                 "error_type": error_type,
                 "position": position,
                 "available_tables": available_tables,
-                "available_columns": available_columns
+                "available_columns": available_columns,
+                "raw_message": message
             }
         )
 
@@ -791,6 +811,7 @@ class SmartErrorDiagnostic:
         if not suggestions:
             return original_message
 
+        # 仅展示智能建议条目
         enhanced = f"{original_message}\n\n💡 智能建议："
         for i, suggestion in enumerate(suggestions, 1):
             confidence_icon = "🎯" if suggestion.confidence > 0.8 else "💭"
@@ -799,6 +820,14 @@ class SmartErrorDiagnostic:
                 enhanced += f"\n   示例: {suggestion.example}"
 
         return enhanced
+
+    @staticmethod
+    def _prepend_structured_triplet(err_type: str, position: str, reason: str) -> str:
+        """将标准三元组格式置顶，便于GUI在出错时展示。
+
+        形如: [错误类型, 位置, 原因]
+        """
+        return f"[{err_type}, {position}, {reason}]"
 
 
 class ErrorFormatter:
