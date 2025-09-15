@@ -23,7 +23,9 @@ class StorageEngine:
     def __init__(self, base_dir: str = USER_DB_DIR,
                  cache_capacity: int = DEFAULT_CACHE_CAPACITY,
                  cache_strategy: str = DEFAULT_CACHE_STRATEGY,
-                 enable_wal: bool = True):
+                 enable_wal: bool = True,
+                 enable_readahead: bool = True,
+                 readahead_window: int = 3):
         """
         初始化存储引擎
 
@@ -34,7 +36,7 @@ class StorageEngine:
             enable_wal: 是否启用WAL日志
         """
         self.fs = FileStorage(base_dir)
-        self.buffer_pool = BufferPool(cache_capacity, cache_strategy, self.fs)
+        self.buffer_pool = BufferPool(cache_capacity, cache_strategy, self.fs, enable_readahead, readahead_window)
         self.enable_wal = enable_wal
 
         # 页分配管理
