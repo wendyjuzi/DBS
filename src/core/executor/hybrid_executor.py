@@ -306,11 +306,15 @@ class HybridExecutionEngine:
             print(f"[EXEC] 过滤后 {len(filtered_rows)} 行")
         # MVCC：在投影前应用版本链可见性替换（调用C++可见性查询）
         filtered_rows = self._apply_mvcc_to_rows(table_name, filtered_rows)
-        # 投影
-        try:
-            projected_data = self.executor.project(table_name, filtered_rows, target_columns)
-        except Exception:
-            projected_data = [r.get_values() for r in filtered_rows]
+        # 聚合回退（无GROUP BY场景）：当目标列包含聚合表达式时，在Python侧聚合
+        if self._has_aggregates(target_columns):
+            projected_data, target_columns = self._aggregate_fallback(table_name, filtered_rows, target_columns)
+        else:
+            # 投影
+            try:
+                projected_data = self.executor.project(table_name, filtered_rows, target_columns)
+            except Exception:
+                projected_data = [r.get_values() for r in filtered_rows]
         # 事务覆盖层合并（仅当前表，无JOIN时）：
         if self._current_txid and table_name in self._tx_overlay:
             try:
@@ -374,12 +378,88 @@ class HybridExecutionEngine:
 
     def _execute_delete(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         table_name = plan["table"]
+        # 兼容多种 where 表达：字符串 plan['where']，或列表/字典在 plan['where_clause']
         where_clause = plan.get("where")
+        wc_list = None
+        if where_clause is None:
+            wc_list = plan.get("where_clause")
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
         if table_name not in self.table_columns:
             raise CatalogError(f"表 '{table_name}' 不存在")
-        predicate = self._build_predicate(table_name, where_clause)
+        # 构建谓词（参考 _execute_update 中的处理）
+        if isinstance(where_clause, str) and where_clause:
+            predicate = self._build_predicate(table_name, where_clause)
+        elif isinstance(wc_list, list) and wc_list:
+            cols = self.table_columns.get(table_name, [])
+            def make_pred(conds, cols_names):
+                def eval_num(lhs: str, op: str, rhs: str) -> bool:
+                    try:
+                        ln = float(lhs); rn = float(rhs)
+                        if op == "=": return ln == rn
+                        if op == ">": return ln > rn
+                        if op == "<": return ln < rn
+                        if op == ">=": return ln >= rn
+                        if op == "<=": return ln <= rn
+                        if op == "!=": return ln != rn
+                        return False
+                    except Exception:
+                        if op == "=": return lhs == rhs
+                        if op == ">": return lhs > rhs
+                        if op == "<": return lhs < rhs
+                        if op == ">=": return lhs >= rhs
+                        if op == "<=": return lhs <= rhs
+                        if op == "!=": return lhs != rhs
+                        return False
+                idx_ops_vals = []
+                for c in conds:
+                    col = str(c.get("column",""))
+                    op = str(c.get("op","=")).upper()
+                    val = str(c.get("value",""))
+                    try:
+                        idx = cols_names.index(col)
+                        idx_ops_vals.append((idx, op, val))
+                    except ValueError:
+                        idx_ops_vals.append((-1, op, val))
+                def pred(x):
+                    for i,op,v in idx_ops_vals:
+                        if i < 0 or i >= len(x):
+                            return False
+                        # 数值/字符串比较
+                        try:
+                            ln = float(str(x[i])); rn = float(v)
+                            if op == "=":
+                                ok = ln == rn
+                            elif op == ">":
+                                ok = ln > rn
+                            elif op == "<":
+                                ok = ln < rn
+                            elif op == ">=":
+                                ok = ln >= rn
+                            elif op == "<=":
+                                ok = ln <= rn
+                            elif op == "!=":
+                                ok = ln != rn
+                            else:
+                                ok = False
+                        except Exception:
+                            li = str(x[i])
+                            if op == "=": ok = li == v
+                            elif op == ">": ok = li > v
+                            elif op == "<": ok = li < v
+                            elif op == ">=": ok = li >= v
+                            elif op == "<=": ok = li <= v
+                            elif op == "!=": ok = li != v
+                            else: ok = False
+                        if not ok:
+                            return False
+                    return True
+                return pred
+            predicate = make_pred(wc_list, cols)
+        else:
+            # 无 where 时，不做全表删除的危险操作，返回0行受影响
+            def predicate(_x):
+                return False
         # 简化：逐行扫描找主键以维护索引与记录 WAL
         txid = self._current_txid or self._txm.begin().txid
         is_implicit_tx = self._current_txid is None
@@ -455,34 +535,147 @@ class HybridExecutionEngine:
             raise ExecutionError(f"WHERE条件解析错误: {str(e)}")
 
     def _execute_update(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """执行UPDATE语句"""
+        """执行UPDATE语句（兼容编译器计划格式），并在必要时做回退更新。"""
         table_name = plan["table"]
-        set_clauses = plan.get("set_clauses", [])
+        # 兼容两种字段：set_clauses(list) | set_clause(dict)
+        raw_set = plan.get("set_clauses")
+        if not raw_set:
+            raw_set = plan.get("set_clause")
+        # 归一化为 (col, val) 列表
+        if isinstance(raw_set, dict):
+            set_pairs = [(k, raw_set[k]) for k in raw_set.keys()]
+        elif isinstance(raw_set, list):
+            # 允许 list[ {col:val} ] 或 list[ (col,val) ]
+            pairs = []
+            for it in raw_set:
+                if isinstance(it, dict) and it:
+                    k = list(it.keys())[0]; pairs.append((k, it[k]))
+                elif isinstance(it, (list, tuple)) and len(it) == 2:
+                    pairs.append((it[0], it[1]))
+            set_pairs = pairs
+        else:
+            set_pairs = []
+
+        # where：支持字符串 where | list[ {column,op,value} ]
         where_clause = plan.get("where")
-        
-        print(f"[EXEC] UPDATE {table_name} SET {set_clauses} WHERE {where_clause}")
-        
+        if where_clause is None:
+            wc_list = plan.get("where_clause")
+        else:
+            wc_list = None
+
+        print(f"[EXEC] UPDATE {table_name} SET {set_pairs} WHERE {where_clause if where_clause is not None else wc_list}")
+
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
         if table_name not in self.table_columns:
             raise CatalogError(f"表 '{table_name}' 不存在")
-        
-        # 构建WHERE谓词
-        predicate = self._build_predicate(table_name, where_clause)
-        
-        # 调用C++ UPDATE算子
-        # 简化：记录 WAL，调用底层更新，无法轻易提取旧值时跳过索引维护
+
+        # 构建谓词
+        if isinstance(where_clause, str) and where_clause:
+            predicate = self._build_predicate(table_name, where_clause)
+        elif isinstance(wc_list, list) and wc_list:
+            # AND 连接的简单条件
+            cols = self.table_columns.get(table_name, [])
+            def make_pred(conds, cols_names):
+                def eval_num(lhs: str, op: str, rhs: str) -> bool:
+                    try:
+                        ln = float(lhs); rn = float(rhs)
+                        if op == "=": return ln == rn
+                        if op == ">": return ln > rn
+                        if op == "<": return ln < rn
+                        if op == ">=": return ln >= rn
+                        if op == "<=": return ln <= rn
+                        if op == "!=": return ln != rn
+                        return False
+                    except Exception:
+                        if op == "=": return lhs == rhs
+                        if op == ">": return lhs > rhs
+                        if op == "<": return lhs < rhs
+                        if op == ">=": return lhs >= rhs
+                        if op == "<=": return lhs <= rhs
+                        if op == "!=": return lhs != rhs
+                        return False
+                idx_ops_vals = []
+                for c in conds:
+                    col = str(c.get("column",""))
+                    op = str(c.get("op","=")).upper()
+                    val = str(c.get("value",""))
+                    try:
+                        idx = cols_names.index(col)
+                        idx_ops_vals.append((idx, op, val))
+                    except ValueError:
+                        # 未知列，条件恒假
+                        idx_ops_vals.append((-1, op, val))
+                def pred(x):
+                    for i,op,v in idx_ops_vals:
+                        if i < 0 or i >= len(x) or not eval_num(str(x[i]), op, v):
+                            return False
+                    return True
+                return pred
+            predicate = make_pred(wc_list, cols)
+        else:
+            predicate = self._build_predicate(table_name, where_clause or "")
+
+        # 记录 WAL
         txid = self._current_txid or self._txm.begin().txid
         is_implicit_tx = self._current_txid is None
-        self._wal.append(LogRecord(txid=txid, op="UPDATE", table=table_name, payload={"set": set_clauses, "where": where_clause}))
-        updated_count = self.executor.update_rows(table_name, set_clauses, predicate)
+        self._wal.append(LogRecord(txid=txid, op="UPDATE", table=table_name, payload={"set": set_pairs, "where": where_clause or wc_list}))
+
+        updated_count = 0
+        col_names = self.table_columns.get(table_name, [])
+        pk_col = self._get_pk_column(table_name)
+
+        if set_pairs:
+            if pk_col and pk_col in col_names:
+                # 确认有主键列：总是采用“删后插”以避免底层 update_rows 出现重复
+                pk_idx = col_names.index(pk_col)
+                affected = 0
+                for r in self.executor.seq_scan(table_name):
+                    vals = r.get_values()
+                    try:
+                        if not predicate(vals):
+                            continue
+                    except Exception:
+                        continue
+                    new_vals = list(vals)
+                    for col, v in set_pairs:
+                        try:
+                            cidx = col_names.index(str(col))
+                            new_vals[cidx] = str(v)
+                        except ValueError:
+                            continue
+                    # 按 PK 删除原行
+                    pkv = str(vals[pk_idx]) if pk_idx < len(vals) else ""
+                    try:
+                        self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
+                    except Exception:
+                        pass
+                    # 插入新行
+                    ok = False
+                    try:
+                        ok = bool(self.executor.insert(table_name, new_vals))
+                    except Exception:
+                        ok = False
+                    if ok:
+                        affected += 1
+                        # 维护二级索引
+                        try:
+                            self.index_manager.on_delete(table_name, pkv)
+                            self.index_manager.on_insert(table_name, new_vals, col_names)
+                        except Exception:
+                            pass
+                updated_count = affected
+            else:
+                # 无法确定主键时，退回到底层批量更新
+                try:
+                    updated_count = int(self.executor.update_rows(table_name, set_pairs, predicate))
+                except Exception:
+                    updated_count = 0
+
         if is_implicit_tx:
             self._txm.commit(txid)
-        
-        return {
-            "affected_rows": updated_count,
-            "metadata": {"message": f"更新了 {updated_count} 行"}
-        }
+
+        return {"affected_rows": updated_count, "metadata": {"message": f"更新了 {updated_count} 行"}}
 
     # --- 事务 API ---
     def begin(self) -> str:
@@ -765,50 +958,123 @@ class HybridExecutionEngine:
         if len(tables) < 2:
             raise ExecutionError("JOIN需要至少两个表")
         
-        # 简化实现：只支持两个表的内连接
-        if len(tables) == 2 and len(joins) == 1:
-            left_table = tables[0]
-            right_table = tables[1]
-            join_info = joins[0]
-            
-            # 选择JOIN算法
-            if join_algo == "merge":
-                joined_rows = self.executor.merge_join(
-                    left_table, right_table,
-                    join_info["left_column"], join_info["right_column"]
-                )
-            else:
-                joined_rows = self.executor.inner_join(
-                    left_table, right_table,
-                    join_info["left_column"], join_info["right_column"]
-                )
-            
-            # 应用WHERE条件（如果有）
-            if where_clause:
-                # 简化WHERE处理：假设是单表条件
-                filtered_rows = []
-                for row in joined_rows:
-                    # 这里需要更复杂的WHERE条件处理
-                    # 简化实现：跳过WHERE过滤
-                    filtered_rows.append(row)
-                joined_rows = filtered_rows
-            
-            # 应用投影（如果有）
-            if target_columns != ["*"]:
-                # 简化投影处理
-                projected_rows = []
-                for row in joined_rows:
-                    # 这里需要根据列名映射进行投影
-                    projected_rows.append(row)
-                joined_rows = projected_rows
-            
-            return {
-                "affected_rows": len(joined_rows),
-                "data": joined_rows,
-                "metadata": {"message": f"JOIN返回 {len(joined_rows)} 行", "join_algo": (join_algo or "hash")}
-            }
-        else:
+        # 目前支持两个表的内连接（可扩展）
+        if not (len(tables) == 2 and len(joins) == 1):
             raise ExecutionError("暂不支持复杂的多表JOIN")
+
+        left_table = tables[0]
+        right_table = tables[1]
+        join_info = joins[0] or {}
+        on = join_info.get("on", {}) or {}
+
+        # 解析 ON 条件，允许 "T.COL" 或 "COL"（不带表名时尝试两侧匹配）
+        def parse_col(ref: str) -> (str, str):
+            if not ref:
+                return "", ""
+            s = str(ref)
+            if "." in s:
+                t, c = s.split(".", 1)
+                return t, c
+            return "", s
+
+        l_tbl_ref, l_col = parse_col(on.get("left"))
+        r_tbl_ref, r_col = parse_col(on.get("right"))
+        # 归一化：若未标明表，则按左->右顺序分配
+        if not l_tbl_ref:
+            l_tbl_ref = left_table
+        if not r_tbl_ref:
+            r_tbl_ref = right_table
+        if l_tbl_ref not in (left_table, right_table) or r_tbl_ref not in (left_table, right_table):
+            raise ExecutionError("JOIN 条件引用了未知表")
+        # 如果左右表被写反，则交换
+        if l_tbl_ref == right_table and r_tbl_ref == left_table:
+            left_table, right_table = right_table, left_table
+            l_tbl_ref, r_tbl_ref = r_tbl_ref, l_tbl_ref
+            l_col, r_col = r_col, l_col
+
+        # 准备两表列名
+        for t in (left_table, right_table):
+            if t not in self.table_columns:
+                self._ensure_table_cached(t)
+        left_cols = self.table_columns.get(left_table, [])
+        right_cols = self.table_columns.get(right_table, [])
+        if not left_cols or not right_cols:
+            raise ExecutionError("无法获取表结构用于JOIN")
+        try:
+            l_idx = left_cols.index(l_col)
+            r_idx = right_cols.index(r_col)
+        except ValueError:
+            raise ExecutionError("JOIN 列不存在于对应表中")
+
+        # 获取行
+        left_rows = self.executor.seq_scan(left_table)
+        right_rows = self.executor.seq_scan(right_table)
+
+        # 选择算法：hash 为默认
+        out_rows = []
+        if join_algo == "merge":
+            # 简化：将两侧排序后双指针（字符串比较）
+            lvals = [(r.get_values(), str(r.get_values()[l_idx]) if l_idx < len(r.get_values()) else "") for r in left_rows]
+            rvals = [(r.get_values(), str(r.get_values()[r_idx]) if r_idx < len(r.get_values()) else "") for r in right_rows]
+            lvals.sort(key=lambda x: x[1]); rvals.sort(key=lambda x: x[1])
+            i = j = 0
+            while i < len(lvals) and j < len(rvals):
+                lv = lvals[i][1]; rv = rvals[j][1]
+                if lv == rv:
+                    # 收集所有等值范围
+                    j2 = j
+                    while j2 < len(rvals) and rvals[j2][1] == rv:
+                        out_rows.append(lvals[i][0] + rvals[j2][0])
+                        j2 += 1
+                    i += 1
+                elif lv < rv:
+                    i += 1
+                else:
+                    j += 1
+        else:
+            # hash join（右表建哈希）
+            h: Dict[str, List[List[str]]] = {}
+            for rr in right_rows:
+                vals = rr.get_values()
+                key = str(vals[r_idx]) if r_idx < len(vals) else ""
+                h.setdefault(key, []).append(vals)
+            for lr in left_rows:
+                lvals = lr.get_values()
+                key = str(lvals[l_idx]) if l_idx < len(lvals) else ""
+                for rv in h.get(key, []):
+                    out_rows.append(lvals + rv)
+
+        # WHERE 过滤（简化：暂不在JOIN后做表达式求值，留作后续增强）
+        # 投影
+        combined_cols = [f"{left_table}.{c}" for c in left_cols] + [f"{right_table}.{c}" for c in right_cols]
+        if target_columns == ["*"]:
+            projected = out_rows
+            proj_cols = combined_cols
+        else:
+            # 支持列名或限定名（table.col）
+            name_to_idx: Dict[str, int] = {}
+            for i, c in enumerate(combined_cols):
+                name_to_idx[c.upper()] = i
+                # 也允许裸列名（若唯一）
+            # 建立裸列名映射（首个出现者）
+            for i, c in enumerate(combined_cols):
+                bare = c.split(".", 1)[1].upper()
+                if bare not in name_to_idx:
+                    name_to_idx[bare] = i
+            proj_indices: List[int] = []
+            for c in target_columns:
+                key = str(c).upper()
+                if key not in name_to_idx:
+                    raise ExecutionError(f"投影列不存在: {c}")
+                proj_indices.append(name_to_idx[key])
+            projected = [[row[i] if i < len(row) else None for i in proj_indices] for row in out_rows]
+            proj_cols = [str(c) for c in target_columns]
+
+        return {
+            "affected_rows": len(projected),
+            "data": projected,
+            "metadata": {"columns": proj_cols, "join_algo": (join_algo or "hash")}
+        }
 
     def _execute_order_by(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行ORDER BY操作"""
@@ -835,6 +1101,82 @@ class HybridExecutionEngine:
             "data": data,
             "metadata": {"message": f"排序返回 {len(data)} 行"}
         }
+
+    def _has_aggregates(self, cols: List[str]) -> bool:
+        if not cols:
+            return False
+        s = ",".join([str(c).upper() for c in cols])
+        return any(k in s for k in ("COUNT(", "SUM(", "AVG(", "MIN(", "MAX(") )
+
+    def _aggregate_fallback(self, table: str, rows, cols: List[str]):
+        """在无GROUP BY时，对 COUNT/SUM/AVG/MIN/MAX 进行本地聚合，返回([[vals]], new_cols)。"""
+        # 准备列名映射
+        table_cols = self.table_columns.get(table, [])
+        name_to_idx = {str(c).upper(): i for i, c in enumerate(table_cols)}
+        values = [r.get_values() for r in rows]
+        def parse_arg(expr: str) -> str:
+            # 支持 COUNT(*), FUNC(col)
+            up = expr.strip().upper()
+            if up == "COUNT(*)":
+                return "*"
+            if "(" in up and up.endswith(")"):
+                return up[up.find("(") + 1:-1].strip()
+            return up
+        out_vals: List[str] = []
+        out_cols: List[str] = []
+        for c in cols:
+            cu = str(c).upper()
+            if cu.startswith("COUNT("):
+                out_vals.append(len(values))
+                out_cols.append(c)
+            elif cu.startswith("SUM("):
+                arg = parse_arg(c)
+                idx = name_to_idx.get(arg, -1)
+                s = 0.0
+                for v in values:
+                    if 0 <= idx < len(v):
+                        try:
+                            s += float(v[idx])
+                        except Exception:
+                            pass
+                out_vals.append(int(s) if s.is_integer() else s)
+                out_cols.append(c)
+            elif cu.startswith("AVG("):
+                arg = parse_arg(c)
+                idx = name_to_idx.get(arg, -1)
+                s = 0.0; n = 0
+                for v in values:
+                    if 0 <= idx < len(v):
+                        try:
+                            s += float(v[idx]); n += 1
+                        except Exception:
+                            pass
+                out_vals.append((s / n) if n > 0 else 0)
+                out_cols.append(c)
+            elif cu.startswith("MIN("):
+                arg = parse_arg(c)
+                idx = name_to_idx.get(arg, -1)
+                cur = None
+                for v in values:
+                    if 0 <= idx < len(v):
+                        val = v[idx]
+                        cur = val if cur is None or val < cur else cur
+                out_vals.append(cur)
+                out_cols.append(c)
+            elif cu.startswith("MAX("):
+                arg = parse_arg(c)
+                idx = name_to_idx.get(arg, -1)
+                cur = None
+                for v in values:
+                    if 0 <= idx < len(v):
+                        val = v[idx]
+                        cur = val if cur is None or val > cur else cur
+                out_vals.append(cur)
+                out_cols.append(c)
+            else:
+                # 非聚合列在无GROUP BY语义下不可直接返回，这里忽略
+                continue
+        return [out_vals], out_cols
 
     def _execute_group_by(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行GROUP BY操作"""
@@ -894,6 +1236,52 @@ class HybridExecutionEngine:
             # 清理本地缓存
             if table_name in self.table_columns:
                 del self.table_columns[table_name]
+            # 额外清理：删除对应的数据页文件（*_page_*.bin），确保物理清理干净
+            try:
+                import os, re
+                patterns = [
+                    re.compile(rf"^{re.escape(table_name)}_page_\d+\.bin$", re.IGNORECASE)
+                ]
+                # 限定扫描目录：cwd、工程根、工程根上一级，深度不超过2层
+                scan_dirs = []
+                try:
+                    scan_dirs.append(os.getcwd())
+                except Exception:
+                    pass
+                try:
+                    from pathlib import Path as _P
+                    from ...api.sql_compiler_adapter import proj_root as _PROJ  # type: ignore
+                    scan_dirs.append(str(_PROJ))
+                    scan_dirs.append(str(_P(_PROJ).parent))
+                except Exception:
+                    pass
+                seen = set()
+                for base in scan_dirs:
+                    if not base or not os.path.isdir(base):
+                        continue
+                    for root, _dirs, files in os.walk(base):
+                        # 控制扫描深度
+                        try:
+                            from pathlib import Path as _PP
+                            depth = len(_PP(root).relative_to(base).parts) if _PP(root) != _PP(base) else 0
+                            if depth > 2:
+                                continue
+                        except Exception:
+                            pass
+                        for fn in files:
+                            fpath = os.path.join(root, fn)
+                            if fpath in seen:
+                                continue
+                            for pat in patterns:
+                                if pat.match(fn):
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+                                    seen.add(fpath)
+                                    break
+            except Exception:
+                pass
             
             return {
                 "affected_rows": 0,

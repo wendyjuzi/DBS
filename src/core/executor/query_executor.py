@@ -119,6 +119,7 @@ class QueryExecutor:
                 elif op == "<":
                     keep = not (lhs < val)
             if not keep:
-                self.storage.delete_in_page(table, page_id, slot_idx)
+                # storage 引擎提供 delete_row 接口
+                self.storage.delete_row(table, page_id, slot_idx)
                 affected += 1
         return {"affected_rows": affected}

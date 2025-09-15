@@ -1,14 +1,18 @@
 from typing import Dict, List, DefaultDict
 from collections import defaultdict
 import bisect
+try:
+	from .bptree import BPlusTree
+	_HAS_BPTREE = True
+except Exception:
+	_HAS_BPTREE = False
 
 
 class IndexManager:
     """
     简易二级索引管理器（内存级）
-    - 支持为 (table, column) 建立到主键列 pk_column 的倒排索引
-    - 仅支持等值查询加速：value -> [pk_values]
-    - 持久化暂无，进程内有效
+    - 默认倒排映射 + 有序键，支持等值与范围
+    - 若可用，使用B+树作为后端（每个(table,column)一棵）
     """
 
     def __init__(self):
@@ -16,10 +20,12 @@ class IndexManager:
         self._indexes: Dict[tuple, DefaultDict[str, List[str]]] = {}
         # 记录每个索引绑定的主键列
         self._pk_column_of_index: Dict[tuple, str] = {}
-        # 维护每个索引的已排序键列表（用于范围查询，简易实现）
+        # 维护每个索引的已排序键列表（用于范围查询，简易实现；当B+树可用时不使用）
         self._sorted_keys: Dict[tuple, List[str]] = {}
         # 记录索引策略（USING BTREE/HASH 等），仅保存元数据
         self._strategy: Dict[tuple, str] = {}
+        # 如可用，维护 B+树
+        self._bpt: Dict[tuple, BPlusTree] = {}
 
     def create_index(self, table: str, column: str, pk_column: str, strategy: str = "BTREE") -> bool:
         key = (table, column)
@@ -29,6 +35,8 @@ class IndexManager:
         self._pk_column_of_index[key] = pk_column
         self._sorted_keys[key] = []
         self._strategy[key] = (strategy or "BTREE").upper()
+        if _HAS_BPTREE and self._strategy[key] == "BTREE":
+            self._bpt[key] = BPlusTree(order=64)
         return True
 
     def drop_index(self, table: str, column: str) -> bool:
@@ -38,6 +46,7 @@ class IndexManager:
         self._pk_column_of_index.pop(key, None)
         self._sorted_keys.pop(key, None)
         self._strategy.pop(key, None)
+        self._bpt.pop(key, None)
         return existed
 
     def has_index(self, table: str, column: str) -> bool:
@@ -76,12 +85,18 @@ class IndexManager:
                         if pk not in idx[val]:
                             idx[val].append(pk)
                             # 维护排序键（仅在新值首次出现时插入）
-                            if (t, col) in self._sorted_keys and len(idx[val]) == 1:
+                            if (t, col) in self._sorted_keys and len(idx[val]) == 1 and (t, col) not in self._bpt:
                                 keys = self._sorted_keys[(t, col)]
                                 # 简易地按字符串顺序插入
                                 pos = bisect.bisect_left(keys, val)
                                 if pos >= len(keys) or keys[pos] != val:
                                     keys.insert(pos, val)
+                        # B+树写入
+                        if (t, col) in self._bpt:
+                            try:
+                                self._bpt[(t, col)].insert(val, pk)
+                            except Exception:
+                                pass
         except Exception:
             pass
 
@@ -98,13 +113,20 @@ class IndexManager:
                         pks.remove(pk_value)
                         if not pks:
                             # 从排序键中移除
-                            keys = self._sorted_keys.get((t, col))
-                            if keys and v in keys:
-                                try:
-                                    keys.remove(v)
-                                except ValueError:
-                                    pass
+                            if (t, col) not in self._bpt:
+                                keys = self._sorted_keys.get((t, col))
+                                if keys and v in keys:
+                                    try:
+                                        keys.remove(v)
+                                    except ValueError:
+                                        pass
                             del idx[v]
+                # B+树删除值
+                if (t, col) in self._bpt:
+                    try:
+                        self._bpt[(t, col)].delete_value(v, pk_value)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -146,16 +168,27 @@ class IndexManager:
                     if idx is not None:
                         if pk not in idx[new_val]:
                             idx[new_val].append(pk)
-                            if (t, col) in self._sorted_keys and len(idx[new_val]) == 1:
+                            if (t, col) in self._sorted_keys and len(idx[new_val]) == 1 and (t, col) not in self._bpt:
                                 keys = self._sorted_keys[(t, col)]
                                 pos = bisect.bisect_left(keys, new_val)
                                 if pos >= len(keys) or keys[pos] != new_val:
                                     keys.insert(pos, new_val)
+                        if (t, col) in self._bpt:
+                            try:
+                                self._bpt[(t, col)].insert(new_val, pk)
+                            except Exception:
+                                pass
         except Exception:
             pass
 
     def lookup_pks(self, table: str, column: str, value: str) -> List[str]:
-        idx = self._indexes.get((table, column))
+        key = (table, column)
+        if key in self._bpt:
+            try:
+                return list(self._bpt[key].get(str(value)))
+            except Exception:
+                return []
+        idx = self._indexes.get(key)
         if not idx:
             return []
         return list(idx.get(str(value), []))
@@ -163,11 +196,19 @@ class IndexManager:
     def range_lookup_pks(self, table: str, column: str, min_value: str = None, max_value: str = None,
                          include_min: bool = True, include_max: bool = True) -> List[str]:
         key = (table, column)
+        if key in self._bpt:
+            try:
+                return list(self._bpt[key].range(
+                    str(min_value) if min_value is not None else None,
+                    str(max_value) if max_value is not None else None,
+                    include_min, include_max
+                ))
+            except Exception:
+                return []
         idx = self._indexes.get(key)
         keys = self._sorted_keys.get(key)
         if not idx or keys is None:
             return []
-        # 计算边界
         left = 0
         right = len(keys)
         if min_value is not None:

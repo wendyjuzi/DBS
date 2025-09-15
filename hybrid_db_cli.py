@@ -797,7 +797,7 @@ class HybridDatabaseCLI:
 💡 示例:
   CREATE TABLE students (id INT, name STRING, age INT, score DOUBLE);
   INSERT INTO students (id, name, age, score) VALUES (1, 'Alice', 20, 85.5);
-  SELECT name, score FROM students WHERE age > 21;
+  SELECT name, score FROM students WHERE age < 21;
   UPDATE students SET score = 90.0 WHERE id = 1;
   DELETE FROM students WHERE id = 1;
   DROP TABLE students;

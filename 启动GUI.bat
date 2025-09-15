@@ -8,7 +8,7 @@ echo.
 cd /d "%~dp0"
 
 echo 正在启动数据库GUI...
-python run_gui.py
+python database_gui.py
 
 if %errorlevel% neq 0 (
     echo.
