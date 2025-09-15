@@ -1412,6 +1412,222 @@ class SQLCompilerAdapter:
             print(f"JSON导出失败: {str(e)}")
             return False
 
+    # 添加导入方法
+    def import_table(self, table_name: str, format_type: str, file_path: str) -> bool:
+        """
+        从文件导入数据到表
+
+        Args:
+            table_name: 表名
+            format_type: 导入格式 (csv/json)
+            file_path: 文件路径
+
+        Returns:
+            bool: 导入是否成功
+        """
+        try:
+            if format_type.lower() == 'csv':
+                return self._import_from_csv(table_name, file_path)
+            elif format_type.lower() == 'json':
+                return self._import_from_json(table_name, file_path)
+            else:
+                print(f"❌ 不支持的导入格式: {format_type}")
+                return False
+        except Exception as e:
+            print(f"❌ 导入失败: {str(e)}")
+            return False
+
+    def _import_from_csv(self, table_name: str, file_path: str) -> bool:
+        """从CSV文件导入数据"""
+        try:
+            import csv
+            import os
+
+            # 检查文件是否存在
+            if not os.path.exists(file_path):
+                print(f"❌ 文件不存在: {file_path}")
+                return False
+
+            # 读取CSV文件
+            with open(file_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+
+                # 读取列名（第一行）
+                columns = next(reader)
+                print(f"📋 检测到列: {columns}")
+
+                # 读取数据
+                data_rows = []
+                for row in reader:
+                    if row:  # 跳过空行
+                        data_rows.append(row)
+
+                if not data_rows:
+                    print("⚠️  CSV文件中没有数据")
+                    return True  # 没有数据也算成功
+
+                print(f"📊 读取到 {len(data_rows)} 行数据")
+
+                # 检查表是否存在，如果不存在则创建
+                try:
+                    # 尝试获取表信息，如果失败说明表不存在
+                    self.storage_engine.get_table_columns(table_name)
+                    print(f"✓ 表 {table_name} 已存在，直接插入数据")
+                except Exception:
+                    # 表不存在，需要创建
+                    print(f"📝 表 {table_name} 不存在，正在创建...")
+
+                    # 推断数据类型
+                    column_defs = []
+                    for i, col in enumerate(columns):
+                        # 简单数据类型推断
+                        sample_value = data_rows[0][i] if i < len(data_rows[0]) else ""
+                        col_type = self._infer_data_type(sample_value)
+                        column_defs.append(f"{col} {col_type}")
+
+                    # 创建表
+                    create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
+                    result = self.execute(create_sql)
+                    if result.get("status") == "error":
+                        print(f"❌ 创建表失败: {result.get('error')}")
+                        return False
+                    print(f"✓ 表 {table_name} 创建成功")
+
+                # 批量插入数据
+                print("⏳ 正在插入数据...")
+                for i, row in enumerate(data_rows):
+                    if len(row) != len(columns):
+                        print(f"⚠️  第 {i + 2} 行列数不匹配，跳过")
+                        continue
+
+                    # 构建INSERT语句
+                    values_str = ", ".join([f"'{v}'" for v in row])
+                    columns_str = ", ".join(columns)
+                    insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+
+                    try:
+                        result = self.execute(insert_sql)
+                        if result.get("status") == "error":
+                            print(f"⚠️  插入第 {i + 2} 行失败: {result.get('error')}")
+                    except Exception as e:
+                        print(f"⚠️  插入第 {i + 2} 行失败: {e}")
+
+                print(f"✓ 数据导入完成，共处理 {len(data_rows)} 行")
+                return True
+
+        except Exception as e:
+            print(f"❌ CSV导入失败: {str(e)}")
+            return False
+
+    def _import_from_json(self, table_name: str, file_path: str) -> bool:
+        """从JSON文件导入数据"""
+        try:
+            import json
+            import os
+
+            # 检查文件是否存在
+            if not os.path.exists(file_path):
+                print(f"❌ 文件不存在: {file_path}")
+                return False
+
+            # 读取JSON文件
+            with open(file_path, 'r', encoding='utf-8') as jsonfile:
+                data = json.load(jsonfile)
+
+            if not data:
+                print("⚠️  JSON文件中没有数据")
+                return True
+
+            if not isinstance(data, list):
+                print("❌ JSON文件格式错误：应为数组格式")
+                return False
+
+            # 获取列名（从第一个对象）
+            first_row = data[0]
+            if not isinstance(first_row, dict):
+                print("❌ JSON文件格式错误：数组元素应为对象")
+                return False
+
+            columns = list(first_row.keys())
+            print(f"📋 检测到列: {columns}")
+
+            # 检查表是否存在，如果不存在则创建
+            try:
+                self.storage_engine.get_table_columns(table_name)
+                print(f"✓ 表 {table_name} 已存在，直接插入数据")
+            except Exception:
+                # 表不存在，需要创建
+                print(f"📝 表 {table_name} 不存在，正在创建...")
+
+                # 推断数据类型
+                column_defs = []
+                for col in columns:
+                    sample_value = first_row[col]
+                    col_type = self._infer_data_type(sample_value)
+                    column_defs.append(f"{col} {col_type}")
+
+                # 创建表
+                create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
+                result = self.execute(create_sql)
+                if result.get("status") == "error":
+                    print(f"❌ 创建表失败: {result.get('error')}")
+                    return False
+                print(f"✓ 表 {table_name} 创建成功")
+
+            # 批量插入数据
+            print("⏳ 正在插入数据...")
+            for i, row in enumerate(data):
+                if not isinstance(row, dict):
+                    print(f"⚠️  第 {i + 1} 行格式错误，跳过")
+                    continue
+
+                # 构建值列表
+                values = []
+                for col in columns:
+                    value = row.get(col, "")
+                    values.append(str(value) if value is not None else "")
+
+                # 构建INSERT语句
+                values_str = ", ".join([f"'{v}'" for v in values])
+                columns_str = ", ".join(columns)
+                insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+
+                try:
+                    result = self.execute(insert_sql)
+                    if result.get("status") == "error":
+                        print(f"⚠️  插入第 {i + 1} 行失败: {result.get('error')}")
+                except Exception as e:
+                    print(f"⚠️  插入第 {i + 1} 行失败: {e}")
+
+            print(f"✓ 数据导入完成，共处理 {len(data)} 行")
+            return True
+
+        except Exception as e:
+            print(f"❌ JSON导入失败: {str(e)}")
+            return False
+
+    def _infer_data_type(self, value: str) -> str:
+        """推断数据类型"""
+        if not value:
+            return "STRING"
+
+        # 尝试解析为整数
+        try:
+            int(value)
+            return "INT"
+        except ValueError:
+            pass
+
+        # 尝试解析为浮点数
+        try:
+            float(value)
+            return "DOUBLE"
+        except ValueError:
+            pass
+
+        # 默认为字符串
+        return "STRING"
+
     def get_cache_stats(self) -> Dict[str, Any]:
         """获取缓存统计信息"""
         if self.hybrid_storage:

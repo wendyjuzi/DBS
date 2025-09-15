@@ -124,3 +124,21 @@
 {"txid": "3300f47d-c575-4c77-b542-81e9d9d9bfc2", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "3300f47d-c575-4c77-b542-81e9d9d9bfc2", "op": "INSERT", "table": "tb_7d8f0352", "payload": {"values": ["2", "y"]}}
 {"txid": "3300f47d-c575-4c77-b542-81e9d9d9bfc2", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "a8137052-5566-4498-8cbf-7594def695f3", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "a8137052-5566-4498-8cbf-7594def695f3", "op": "INSERT", "table": "students", "payload": {"values": ["2", "Rosin", "19", "90.0"]}}
+{"txid": "a8137052-5566-4498-8cbf-7594def695f3", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b7493193-0742-49be-8cea-026604436131", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b7493193-0742-49be-8cea-026604436131", "op": "UPDATE", "table": "students", "payload": {"set": [], "where": null}}
+{"txid": "b7493193-0742-49be-8cea-026604436131", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "23f319a6-8006-4649-8aae-d9a5da7ce319", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "23f319a6-8006-4649-8aae-d9a5da7ce319", "op": "INSERT", "table": "students", "payload": {"values": ["1", "Rose", "17", "75.5"]}}
+{"txid": "23f319a6-8006-4649-8aae-d9a5da7ce319", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "725cd30c-07f6-4a72-bedb-6c4467473982", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "725cd30c-07f6-4a72-bedb-6c4467473982", "op": "INSERT", "table": "students", "payload": {"values": ["2", "Ming", "23", "95.5"]}}
+{"txid": "725cd30c-07f6-4a72-bedb-6c4467473982", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "86c6bed8-e39f-4daf-a733-111f83fa0859", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "86c6bed8-e39f-4daf-a733-111f83fa0859", "op": "INSERT", "table": "students", "payload": {"values": ["1", "Peter", "19", "80.5"]}}
+{"txid": "86c6bed8-e39f-4daf-a733-111f83fa0859", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "4f916f2c-e495-43c4-86f3-8d8cc768e2ac", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "4f916f2c-e495-43c4-86f3-8d8cc768e2ac", "op": "INSERT", "table": "students", "payload": {"values": ["2", "Rohue", "19", "92.0"]}}
+{"txid": "4f916f2c-e495-43c4-86f3-8d8cc768e2ac", "op": "COMMIT", "table": null, "payload": {}}
