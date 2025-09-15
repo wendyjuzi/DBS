@@ -88,6 +88,15 @@ class ASTNode:
         elif self.node_type == "SELECT":
             result["columns"] = [child.value for child in self.children if child.node_type == "COLUMN"]
             
+            # 处理聚合函数
+            aggregates = []
+            for child in self.children:
+                if child.node_type == "AGGREGATE":
+                    agg_func = child.value
+                    agg_arg = next((c.value for c in child.children if c.node_type == "ARG"), None)
+                    aggregates.append({"function": agg_func, "column": agg_arg})
+            result["aggregates"] = aggregates
+            
             # 处理 INTO 子句
             into_node = next((child for child in self.children if child.node_type == "INTO"), None)
             result["into_variable"] = into_node.value if into_node else None
@@ -118,10 +127,7 @@ class ASTNode:
             # 处理 WHERE 条件
             where_node = next((child for child in self.children if child.node_type == "WHERE"), None)
             if where_node:
-                left = next((c.value for c in where_node.children if c.node_type == "LEFT"), None)
-                op = next((c.value for c in where_node.children if c.node_type == "OP"), None)
-                right = next((c.value for c in where_node.children if c.node_type == "RIGHT"), None)
-                result["where"] = {"left": left, "op": op, "right": right}
+                result["where"] = self._parse_where_condition_dict(where_node)
             else:
                 result["where"] = None
             
@@ -157,10 +163,7 @@ class ASTNode:
             # 处理 WHERE 条件
             where_node = next((child for child in self.children if child.node_type == "WHERE"), None)
             if where_node:
-                left = next((c.value for c in where_node.children if c.node_type == "LEFT"), None)
-                op = next((c.value for c in where_node.children if c.node_type == "OP"), None)
-                right = next((c.value for c in where_node.children if c.node_type == "RIGHT"), None)
-                result["where"] = {"left": left, "op": op, "right": right}
+                result["where"] = self._parse_where_condition_dict(where_node)
             else:
                 result["where"] = None
                 
@@ -169,10 +172,7 @@ class ASTNode:
             # 处理 WHERE 条件
             where_node = next((child for child in self.children if child.node_type == "WHERE"), None)
             if where_node:
-                left = next((c.value for c in where_node.children if c.node_type == "LEFT"), None)
-                op = next((c.value for c in where_node.children if c.node_type == "OP"), None)
-                right = next((c.value for c in where_node.children if c.node_type == "RIGHT"), None)
-                result["where"] = {"left": left, "op": op, "right": right}
+                result["where"] = self._parse_where_condition_dict(where_node)
             else:
                 result["where"] = None
                 
@@ -237,12 +237,70 @@ class ASTNode:
             for child in self.children:
                 if child.node_type == "ARGUMENTS":
                     result["arguments"] = child.value.split(",") if child.value else []
+        elif self.node_type in ["SHOW_TABLES", "SHOW_DATABASES", "SHOW_SCHEMAS"]:
+            result["show_type"] = self.node_type.replace("SHOW_", "").lower()
         else:
             # 默认格式，用于其他类型的节点
             result["value"] = self.value
             result["children"] = [child.to_dict() for child in self.children]
             
         return result
+
+    def _parse_where_condition_dict(self, where_node):
+        """解析 WHERE 条件为字典格式，支持所有操作符"""
+        if not where_node or not where_node.children:
+            return None
+            
+        return self._parse_condition_node(where_node.children[0])
+    
+    def _parse_condition_node(self, node):
+        """递归解析条件节点"""
+        if not node:
+            return None
+            
+        if node.node_type == "COMPARISON":
+            # 简单比较条件: age > 18
+            left = next((c.value for c in node.children if c.node_type == "LEFT"), None)
+            op = node.value
+            right = next((c.value for c in node.children if c.node_type == "RIGHT"), None)
+            return {"left": left, "op": op, "right": right}
+            
+        elif node.node_type == "LOGICAL_OP":
+            # 逻辑运算符: AND/OR
+            logical_op = node.value
+            conditions = []
+            
+            # 递归处理所有子条件
+            for child in node.children:
+                child_condition = self._parse_condition_node(child)
+                if child_condition:
+                    conditions.append(child_condition)
+            
+            return {
+                "logical_op": logical_op,
+                "conditions": conditions
+            }
+            
+        elif node.node_type == "LIKE":
+            # LIKE 条件: name LIKE 'A%'
+            left = next((c.value for c in node.children if c.node_type == "LEFT"), None)
+            pattern = next((c.value for c in node.children if c.node_type == "PATTERN"), None)
+            return {"left": left, "op": "LIKE", "right": pattern}
+            
+        elif node.node_type == "BETWEEN":
+            # BETWEEN 条件: age BETWEEN 18 AND 25
+            left = next((c.value for c in node.children if c.node_type == "LEFT"), None)
+            start = next((c.value for c in node.children if c.node_type == "START"), None)
+            end = next((c.value for c in node.children if c.node_type == "END"), None)
+            return {"left": left, "op": "BETWEEN", "start": start, "end": end}
+            
+        elif node.node_type == "IN":
+            # IN 条件: score IN (85, 90, 95)
+            left = next((c.value for c in node.children if c.node_type == "LEFT"), None)
+            values = [c.value for c in node.children if c.node_type == "VALUE"]
+            return {"left": left, "op": "IN", "values": values}
+        
+        return None
 
 class Parser:
     def __init__(self, tokens):
@@ -409,6 +467,8 @@ class Parser:
             return self.rollback()
         elif self.current_token.lexeme.upper() == "CALL":
             return self.call_procedure()
+        elif self.current_token.lexeme.upper() == "SHOW":
+            return self.show()
         else:
             raise ParseError(f"Unsupported statement beginning with '{self.current_token.lexeme}'", self.current_token)
 
@@ -1809,6 +1869,26 @@ class Parser:
         else:
             raise ParseError(f"Unexpected token in expression: {self.current_token.lexeme}", 
                            self.current_token.line, self.current_token.column)
+
+    def show(self):
+        """解析 SHOW 语句"""
+        self.expect("KEYWORD", "SHOW")
+        
+        if self.current_token.lexeme.upper() == "TABLES":
+            self.expect("KEYWORD", "TABLES")
+            show_node = ASTNode("SHOW_TABLES", "SHOW TABLES")
+        elif self.current_token.lexeme.upper() == "DATABASES":
+            self.expect("KEYWORD", "DATABASES")
+            show_node = ASTNode("SHOW_DATABASES", "SHOW DATABASES")
+        elif self.current_token.lexeme.upper() == "SCHEMAS":
+            self.expect("KEYWORD", "SCHEMAS")
+            show_node = ASTNode("SHOW_SCHEMAS", "SHOW SCHEMAS")
+        else:
+            raise ParseError(f"Unsupported SHOW statement: SHOW {self.current_token.lexeme}", self.current_token)
+        
+        self.expect_delimiter()
+        return show_node
+
 
 # 测试
 if __name__ == "__main__":

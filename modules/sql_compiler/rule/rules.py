@@ -26,6 +26,8 @@ KEYWORDS = {
     "BETWEEN", "IN", "LIKE",
     # 聚合函数
     "COUNT", "SUM", "AVG", "MAX", "MIN",
+    # SHOW 语句
+    "SHOW", "TABLES", "DATABASES", "SCHEMAS",
     # 其他
     "DISTINCT", "ALL", "AS"
 }

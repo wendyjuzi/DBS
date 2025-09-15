@@ -78,6 +78,8 @@ class Planner:
                 plan = self.plan_procedure(ast)
             elif stmt_type == "DELIMITER_STATEMENT":
                 plan = self.plan_delimiter(ast)
+            elif stmt_type in ["SHOW_TABLES", "SHOW_DATABASES", "SHOW_SCHEMAS"]:
+                plan = self.plan_show(ast)
             else:
                 raise PlanError(f"不支持的语句类型: {stmt_type}")
             
@@ -125,6 +127,12 @@ class Planner:
             filter_node.add_child(current_node)
             current_node = filter_node
         
+        # 处理聚合函数
+        if ast.get("aggregates") and len(ast["aggregates"]) > 0:
+            aggregate_node = LogicalPlan("Aggregate", functions=ast["aggregates"])
+            aggregate_node.add_child(current_node)
+            current_node = aggregate_node
+        
         # 处理 GROUP BY
         if ast.get("group_by"):
             group_node = LogicalPlan("GroupBy", columns=ast["group_by"])
@@ -138,10 +146,13 @@ class Planner:
             current_node = sort_node
         
         # 最终的投影操作
-        project_node = LogicalPlan("Project", columns=ast["columns"])
-        project_node.add_child(current_node)
-        
-        return project_node
+        # 如果有聚合函数，直接返回聚合节点，否则添加投影节点
+        if ast.get("aggregates") and len(ast["aggregates"]) > 0:
+            return current_node
+        else:
+            project_node = LogicalPlan("Project", columns=ast["columns"])
+            project_node.add_child(current_node)
+            return project_node
 
     def plan_update(self, ast):
         root = LogicalPlan("Update", table=ast["table"], assignments=ast["assignments"])
@@ -302,6 +313,19 @@ class Planner:
             )
         else:
             raise PlanError(f"未知的存储过程语句类型: {stmt_type}")
+
+    def plan_show(self, ast):
+        """生成 SHOW 语句的执行计划"""
+        show_type = ast["show_type"]
+        
+        if show_type == "tables":
+            return LogicalPlan("ShowTables")
+        elif show_type == "databases":
+            return LogicalPlan("ShowDatabases")
+        elif show_type == "schemas":
+            return LogicalPlan("ShowSchemas")
+        else:
+            raise PlanError(f"不支持的 SHOW 语句类型: {show_type}")
 
     def plan_delimiter(self, ast):
         """生成 DELIMITER 语句的执行计划"""
