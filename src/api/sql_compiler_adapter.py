@@ -593,8 +593,14 @@ class SQLCompilerAdapter:
         if upper_sql == "SHOW COMPOSITE INDEXES":
             return self._handle_show_composite_indexes()
 
+        # 检查是否为EXPORT或IMPORT命令
+        upper_sql = sql.upper().rstrip(';')
+        if upper_sql.startswith("EXPORT TABLE"):
+            return self._handle_export_command(sql)
+        if upper_sql.startswith("IMPORT TABLE"):
+            return self._handle_import_command(sql)
         
-        
+
         try:
             # 视图查询重写（仅支持单表 FROM view 的简单 SELECT）
             vw_rewrite = self._try_execute_view_select(sql)
@@ -2740,6 +2746,52 @@ class SQLCompilerAdapter:
         except Exception as e:
             print(f"❌ JSON导入失败: {str(e)}")
             return False
+
+    def _handle_export_command(self, sql: str) -> Dict[str, Any]:
+        """处理EXPORT TABLE命令"""
+        try:
+            # 解析EXPORT TABLE语句格式：EXPORT TABLE table_name TO format PATH 'file_path'
+            parts = sql.split()
+            if len(parts) < 7:
+                raise SQLSyntaxError("EXPORT语法错误，格式应为: EXPORT TABLE table_name TO format PATH 'file_path'")
+
+            table_name = parts[2]
+            format_type = parts[4].lower()
+            path = parts[6].strip("';")
+
+            # 调用导出方法
+            success = self.export_table(table_name, format_type, path)
+
+            if success:
+                return {"status": "success", "affected_rows": 0,
+                        "metadata": {"message": f"表 {table_name} 已导出到 {path}"}}
+            else:
+                return {"status": "error", "error": f"导出表 {table_name} 失败", "affected_rows": 0}
+        except Exception as e:
+            raise ExecutionError(f"EXPORT命令执行失败: {e}")
+
+    def _handle_import_command(self, sql: str) -> Dict[str, Any]:
+        """处理IMPORT TABLE命令"""
+        try:
+            # 解析IMPORT TABLE语句格式：IMPORT TABLE table_name FROM format PATH 'file_path'
+            parts = sql.split()
+            if len(parts) < 7:
+                raise SQLSyntaxError("IMPORT语法错误，格式应为: IMPORT TABLE table_name FROM format PATH 'file_path'")
+
+            table_name = parts[2]
+            format_type = parts[4].lower()
+            path = parts[6].strip("';")
+
+            # 调用导入方法
+            success = self.import_table(table_name, format_type, path)
+
+            if success:
+                return {"status": "success", "affected_rows": 0,
+                        "metadata": {"message": f"数据已从 {path} 导入到表 {table_name}"}}
+            else:
+                return {"status": "error", "error": f"导入数据到表 {table_name} 失败", "affected_rows": 0}
+        except Exception as e:
+            raise ExecutionError(f"IMPORT命令执行失败: {e}")
 
     def _infer_data_type(self, value: str) -> str:
         """推断数据类型"""
