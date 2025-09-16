@@ -2367,49 +2367,43 @@ class SQLCompilerAdapter:
 
     def export_table(self, table_name: str, format_type: str, output_path: str) -> bool:
         """
-        导出表数据
+        导出表数据 - 直接使用执行器接口
         """
         try:
             t_upper = table_name.upper()
-            # 先获取表的列信息
-            columns = self.storage_engine.get_table_columns(t_upper)
-            if not columns:
-                print(f"表 {t_upper} 不存在或没有列")
-                return False
 
-            # 构建SQL语句（确保有分号）
-            column_str = ", ".join(columns)
-            sql = f"SELECT {column_str} FROM {t_upper};"
+            # 直接使用执行器获取数据
+            try:
+                rows = self.hybrid_executor.executor.seq_scan(t_upper)
+                if not rows:
+                    print(f"表 {t_upper} 为空，无需导出")
+                    return True
 
-            print(f"[EXPORT] 执行导出查询: {sql}")
+                # 获取列信息
+                columns = self.hybrid_executor.table_columns.get(t_upper, [])
+                if not columns:
+                    # 尝试从存储引擎获取列信息
+                    try:
+                        columns = list(self.storage_engine.get_table_columns(t_upper))
+                    except Exception:
+                        # 从数据中推断列名
+                        if rows:
+                            columns = [f"col_{i}" for i in range(len(rows[0].get_values()))]
 
-            # 执行查询
-            result = self.execute(sql)
+                # 转换为数据列表
+                data = [row.get_values() for row in rows]
 
-            if result.get("status") == "error":
-                print(f"查询表数据失败: {result.get('error')}")
-                return False
+                # 根据格式类型导出数据
+                if format_type.lower() == "csv":
+                    return self._export_to_csv(table_name, columns, data, output_path)
+                elif format_type.lower() == "json":
+                    return self._export_to_json(table_name, columns, data, output_path)
+                else:
+                    print(f"不支持的导出格式: {format_type}")
+                    return False
 
-            data = result.get("data", [])
-            metadata = result.get("metadata", {})
-            result_columns = metadata.get("columns", columns)
-
-            if not data:
-                print(f"表 {table_name} 为空，无需导出")
-                return True
-
-            # 确保输出目录存在
-            from pathlib import Path
-            output_dir = Path(output_path).parent
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            # 根据格式类型导出数据
-            if format_type.lower() == "csv":
-                return self._export_to_csv(table_name, result_columns, data, output_path)
-            elif format_type.lower() == "json":
-                return self._export_to_json(table_name, result_columns, data, output_path)
-            else:
-                print(f"不支持的导出格式: {format_type}")
+            except Exception as e:
+                print(f"直接获取数据失败: {e}")
                 return False
 
         except Exception as e:
