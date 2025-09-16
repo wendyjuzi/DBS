@@ -6,6 +6,8 @@ import unittest
 import tempfile
 import os
 import shutil
+import time
+import gc
 from collections import deque
 from typing import Dict, Any
 import sys
@@ -19,6 +21,7 @@ from src.storage.file_storage import FileStorage
 from src.storage.page import Page
 from src.storage.engine import StorageEngine
 from src.storage.constants import PAGE_SIZE
+
 
 class TestBufferPoolFeatures(unittest.TestCase):
     """测试缓存池功能：替换策略、预读机制和WAL恢复"""
@@ -36,11 +39,9 @@ class TestBufferPoolFeatures(unittest.TestCase):
         """清理测试环境"""
         if os.path.exists(self.test_dir):
             # 先尝试关闭所有可能打开的文件句柄
-            import gc
             gc.collect()
 
             # 重试机制删除目录
-            import time
             for _ in range(3):  # 重试3次
                 try:
                     shutil.rmtree(self.test_dir)
@@ -62,8 +63,13 @@ class TestBufferPoolFeatures(unittest.TestCase):
 
     def test_clock_replacement_strategy(self):
         """测试Clock替换策略"""
-        # 创建小容量缓存池以测试替换
-        buffer_pool = BufferPool(capacity=3, strategy="CLOCK", fs=self.fs)
+        # 创建小容量缓存池以测试替换，关闭预读
+        buffer_pool = BufferPool(
+            capacity=3,
+            strategy="CLOCK",
+            fs=self.fs,
+            enable_readahead=False  # 关闭预读
+        )
 
         # 加载几个页面
         page1 = buffer_pool.get_page(self.table_name, 0)
@@ -75,15 +81,17 @@ class TestBufferPoolFeatures(unittest.TestCase):
         self.assertIn((self.table_name, 1), buffer_pool.cache)
         self.assertIn((self.table_name, 2), buffer_pool.cache)
 
-        # 访问页面0和1，设置引用位
+        # 访问页面0和1，设置引用位为1
         buffer_pool.get_page(self.table_name, 0)
         buffer_pool.get_page(self.table_name, 1)
 
-        # 加载第4个页面，应该淘汰页面2（引用位为0）
+        # 页面2的引用位应该还是0，所以应该淘汰页面2
         page4 = buffer_pool.get_page(self.table_name, 3)
 
-        # 验证页面2被淘汰
+        # 验证页面2被淘汰，页面0和1保留
         self.assertNotIn((self.table_name, 2), buffer_pool.cache)
+        self.assertIn((self.table_name, 0), buffer_pool.cache)
+        self.assertIn((self.table_name, 1), buffer_pool.cache)
         self.assertIn((self.table_name, 3), buffer_pool.cache)
 
         # 验证Clock算法统计信息
@@ -120,7 +128,13 @@ class TestBufferPoolFeatures(unittest.TestCase):
 
     def test_fifo_replacement_strategy(self):
         """测试FIFO替换策略"""
-        buffer_pool = BufferPool(capacity=3, strategy="FIFO", fs=self.fs)
+        # 关闭预读，避免干扰
+        buffer_pool = BufferPool(
+            capacity=3,
+            strategy="FIFO",
+            fs=self.fs,
+            enable_readahead=False
+        )
 
         # 加载页面
         buffer_pool.get_page(self.table_name, 0)  # 最先进入
@@ -133,8 +147,10 @@ class TestBufferPoolFeatures(unittest.TestCase):
         # 加载第4个页面，应该淘汰页面0（最先进入）
         buffer_pool.get_page(self.table_name, 3)
 
-        # 验证页面0被淘汰
+        # 验证页面0被淘汰，页面1、2、3在缓存中
         self.assertNotIn((self.table_name, 0), buffer_pool.cache)
+        self.assertIn((self.table_name, 1), buffer_pool.cache)
+        self.assertIn((self.table_name, 2), buffer_pool.cache)
         self.assertIn((self.table_name, 3), buffer_pool.cache)
 
         # 验证FIFO统计信息
@@ -188,8 +204,9 @@ class TestBufferPoolFeatures(unittest.TestCase):
         txid = engine.begin_transaction()
         self.assertIsNotNone(txid)
 
-        # 在事务中修改数据
-        page_id, slot_idx, offset = engine.append_row(self.table_name, b"test_row_1")
+        # 在事务中修改数据 - 使用唯一的数据以便识别
+        unique_data = f"test_row_1_{time.time()}".encode()
+        page_id, slot_idx, offset = engine.append_row(self.table_name, unique_data)
         page = engine.get_page(self.table_name, page_id)
         self.assertIsNotNone(page)
 
@@ -213,14 +230,14 @@ class TestBufferPoolFeatures(unittest.TestCase):
 
         # 调试信息
         print(f"恢复后找到的行数: {len(rows)}")
-        for i, (page_id, slot_idx, row_data) in enumerate(rows):
-            print(f"行 {i}: page={page_id}, slot={slot_idx}, data={row_data}")
+        print(f"查找的数据: {unique_data}")
 
         found = False
         for _, _, row_data in rows:
-            if row_data == b"test_row_1":
+            if row_data == unique_data:
                 found = True
                 break
+            print(f"找到的行: {row_data}")
 
         self.assertTrue(found, "WAL恢复后应能找到提交的数据")
 
