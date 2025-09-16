@@ -2755,72 +2755,7 @@ DELETE FROM students WHERE id = 3;
                     correct_word = correct_word.title()
                 fixes.append((word, correct_word, i))
         
-        # 2. 模糊匹配检测 - 检测编辑距离小的错误
-        sql_keywords = {
-            'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'TABLE',
-            'INDEX', 'DROP', 'ALTER', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'OUTER',
-            'GROUP', 'ORDER', 'BY', 'HAVING', 'LIMIT', 'DISTINCT', 'VALUES',
-            'PRIMARY', 'KEY', 'FOREIGN', 'REFERENCES', 'UNIQUE', 'NOT', 'NULL',
-            'AND', 'OR', 'BETWEEN', 'LIKE', 'IN', 'EXISTS', 'UNION', 'ALL',
-            'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AS', 'IS', 'COUNT', 'SUM',
-            'AVG', 'MIN', 'MAX', 'INTO', 'SET', 'ON', 'USING', 'CONSTRAINT',
-            'DEFAULT', 'AUTO_INCREMENT', 'COMMENT', 'ENGINE', 'CHARSET'
-        }
-        
-        def levenshtein_distance(s1, s2):
-            """计算编辑距离"""
-            if len(s1) < len(s2):
-                return levenshtein_distance(s2, s1)
-            if len(s2) == 0:
-                return len(s1)
-            
-            previous_row = list(range(len(s2) + 1))
-            for i, c1 in enumerate(s1):
-                current_row = [i + 1]
-                for j, c2 in enumerate(s2):
-                    insertions = previous_row[j + 1] + 1
-                    deletions = current_row[j] + 1
-                    substitutions = previous_row[j] + (c1 != c2)
-                    current_row.append(min(insertions, deletions, substitutions))
-                previous_row = current_row
-            
-            return previous_row[-1]
-        
-        # 检查可能的关键字错误（编辑距离 <= 2）
-        for word in words:
-            upper_word = word.upper()
-            # 跳过已经检查过的和明显的非关键字
-            if (upper_word in spell_corrections or 
-                upper_word in sql_keywords or 
-                len(word) < 3 or 
-                word.isdigit() or
-                "'" in word or '"' in word):
-                continue
-                
-            # 寻找最相似的关键字
-            best_match = None
-            min_distance = float('inf')
-            
-            for keyword in sql_keywords:
-                distance = levenshtein_distance(upper_word, keyword)
-                # 只考虑编辑距离 <= 2 且长度相近的匹配
-                if (distance <= 2 and 
-                    distance < min_distance and 
-                    abs(len(word) - len(keyword)) <= 2):
-                    min_distance = distance
-                    best_match = keyword
-            
-            # 如果找到疑似匹配，建议修正
-            if best_match and min_distance <= 2:
-                errors.append(f"'{word}' 可能应为 '{best_match}'")
-                correct_word = best_match
-                if word.lower() == word:
-                    correct_word = correct_word.lower()
-                elif word.title() == word:
-                    correct_word = correct_word.title()
-                fixes.append((word, correct_word, len(fixes)))
-        
-        # 3. 检查常见的词法模式错误
+        # 2. 检查常见的词法模式错误
         # 检查引号不匹配
         single_quotes = sql.count("'")
         double_quotes = sql.count('"')
@@ -2838,7 +2773,7 @@ DELETE FROM students WHERE id = 3;
             else:
                 errors.append(f"多余 {close_parens - open_parens} 个右括号 ')'")
         
-        # 4. 检查数字和标识符格式
+        # 3. 检查数字和标识符格式
         # 检查无效的数字格式
         number_pattern = r'\b\d+\.\d*\.\d+\b'  # 多个小数点
         invalid_numbers = re.findall(number_pattern, sql)
