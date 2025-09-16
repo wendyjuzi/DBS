@@ -10,6 +10,10 @@ PAGE_SIZE = 4096  # 4KB 页大小
 ROW_ACTIVE = 1     # 行状态：活跃
 ROW_DELETED = 0    # 行状态：已删除
 
+# 预读配置
+DEFAULT_READAHEAD_ENABLED = True
+DEFAULT_READAHEAD_WINDOW = 3  # 预读3个页面
+
 # --- 缓存常量 ---
 DEFAULT_CACHE_CAPACITY = 100     # 默认缓存容量（页数）
 DEFAULT_CACHE_STRATEGY = "LRU"   # 默认缓存替换策略
