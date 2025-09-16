@@ -176,6 +176,8 @@ SELECT id, name, score FROM students WHERE age > 18;"""
                    command=self.clear_sql).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="示例",
                    command=self.load_sample_sql).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="加载文件",
+                   command=self.load_sql_file).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="EXPLAIN",
                    command=self.explain_sql).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="导出结果",
@@ -2332,6 +2334,72 @@ DELETE FROM students WHERE id = 3;
 
         self.sql_text.delete(1.0, tk.END)
         self.sql_text.insert(tk.END, sample_sql)
+
+    def load_sql_file(self):
+        """加载SQL文件"""
+        try:
+            filename = filedialog.askopenfilename(
+                title="选择SQL文件",
+                filetypes=[
+                    ("SQL文件", "*.sql"),
+                    ("文本文件", "*.txt"),
+                    ("SQL脚本", "*.ddl"),
+                    ("数据定义", "*.dml"),
+                    ("查询文件", "*.query"),
+                    ("批处理文件", "*.bat"),
+                    ("脚本文件", "*.script"),
+                    ("JSON文件", "*.json"),
+                    ("CSV文件", "*.csv"),
+                    ("所有文件", "*.*")
+                ],
+                defaultextension=".sql"
+            )
+            
+            if not filename:
+                return
+            
+            # 读取文件内容
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 检查文件是否为空
+            if not content.strip():
+                messagebox.showwarning("警告", "选择的文件为空")
+                return
+            
+            # 询问用户是要替换还是追加内容
+            current_content = self.sql_text.get("1.0", tk.END).strip()
+            if current_content:
+                result = messagebox.askyesnocancel(
+                    "加载SQL文件",
+                    "当前输入框有内容，您希望：\n\n"
+                    "是(Yes) - 替换当前内容\n"
+                    "否(No) - 追加到当前内容后\n"
+                    "取消(Cancel) - 取消操作"
+                )
+                
+                if result is None:  # 取消
+                    return
+                elif result:  # 是，替换
+                    self.sql_text.delete(1.0, tk.END)
+                    self.sql_text.insert(1.0, content)
+                else:  # 否，追加
+                    self.sql_text.insert(tk.END, f"\n\n-- 来自文件: {filename}\n{content}")
+            else:
+                # 输入框为空，直接插入
+                self.sql_text.insert(1.0, content)
+            
+            # 显示成功信息
+            self.log(f"✓ 已加载SQL文件: {filename}")
+            
+            # 询问是否立即执行
+            if messagebox.askyesno("执行确认", "是否立即批量执行加载的SQL语句？"):
+                self.execute_sql()  # 使用现有的execute_sql方法，它已经支持多语句
+                
+        except UnicodeDecodeError:
+            messagebox.showerror("错误", "文件编码不支持，请确保文件是UTF-8编码")
+        except Exception as e:
+            messagebox.showerror("错误", f"加载文件失败: {e}")
 
     def export_results(self):
         """导出查询结果"""
