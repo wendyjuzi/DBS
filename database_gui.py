@@ -2976,21 +2976,42 @@ DELETE FROM students WHERE id = 3;
     def export_table_dialog(self):
         win = tk.Toplevel(self.root)
         win.title("导出表")
+
+        def update_file_types(*args):
+            """根据选择的格式更新文件类型"""
+            fmt = fmt_var.get().strip().lower()
+            if fmt == "csv":
+                defext = ".csv"
+                filetypes = [("CSV文件", "*.csv"), ("所有文件", "*.*")]
+            else:  # json
+                defext = ".json"
+                filetypes = [("JSON文件", "*.json"), ("所有文件", "*.*")]
+            return defext, filetypes
+
+        def choose_file():
+            defext, filetypes = update_file_types()
+            fname = filedialog.asksaveasfilename(
+                defaultextension=defext,
+                filetypes=filetypes
+            )
+            if fname:
+                path_var.set(fname)
+
         ttk.Label(win, text="表名:").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
         table_var = tk.StringVar()
         ttk.Entry(win, textvariable=table_var, width=28).grid(row=0, column=1, padx=6, pady=6)
+
         ttk.Label(win, text="格式:").grid(row=1, column=0, padx=6, pady=6, sticky=tk.W)
         fmt_var = tk.StringVar(value="csv")
-        ttk.Combobox(win, textvariable=fmt_var, values=["csv", "json"], state="readonly", width=10).grid(row=1, column=1, padx=6, pady=6, sticky=tk.W)
+        fmt_combo = ttk.Combobox(win, textvariable=fmt_var, values=["csv", "json"], state="readonly", width=10)
+        fmt_combo.grid(row=1, column=1, padx=6, pady=6, sticky=tk.W)
+
         ttk.Label(win, text="保存路径:").grid(row=2, column=0, padx=6, pady=6, sticky=tk.W)
         path_var = tk.StringVar()
         ttk.Entry(win, textvariable=path_var, width=28).grid(row=2, column=1, padx=6, pady=6)
-        def choose_file():
-            defext = ".csv" if fmt_var.get().lower()=="csv" else ".json"
-            fname = filedialog.asksaveasfilename(defaultextension=defext, filetypes=[("CSV","*.csv"),("JSON","*.json"),("所有文件","*.*")])
-            if fname:
-                path_var.set(fname)
+
         ttk.Button(win, text="选择...", command=choose_file).grid(row=2, column=2, padx=6, pady=6)
+
         def do_export():
             table = table_var.get().strip()
             fmt = fmt_var.get().strip().lower()
@@ -3001,6 +3022,7 @@ DELETE FROM students WHERE id = 3;
             sql = f"EXPORT TABLE {table} TO {fmt} PATH '{path}';"
             self._exec_and_display(sql)
             win.destroy()
+
         ttk.Button(win, text="导出", command=do_export).grid(row=3, column=1, padx=6, pady=12, sticky=tk.W)
 
     # ===== 通用执行与建议 =====

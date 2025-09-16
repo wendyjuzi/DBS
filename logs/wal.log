@@ -1149,6 +1149,29 @@
 {"txid": "88a84c85-8c6c-4979-ba92-fd4b40153bb2", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "88a84c85-8c6c-4979-ba92-fd4b40153bb2", "op": "UPDATE", "table": "STUDENTS", "payload": {"set": [["SCORE", "95.0"]], "where": [{"column": "ID", "op": "=", "value": "1"}]}}
 {"txid": "88a84c85-8c6c-4979-ba92-fd4b40153bb2", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9bee2be8-54ba-4ee9-ad33-16db173736a2", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9bee2be8-54ba-4ee9-ad33-16db173736a2", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "85.5"]}}
+{"txid": "9bee2be8-54ba-4ee9-ad33-16db173736a2", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "32950627-6673-4bb2-94ec-5c63fa2b8e53", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "32950627-6673-4bb2-94ec-5c63fa2b8e53", "op": "UPDATE", "table": "STUDENTS", "payload": {"set": [["SCORE", "90.0"]], "where": [{"column": "ID", "op": "=", "value": "1"}]}}
+{"txid": "32950627-6673-4bb2-94ec-5c63fa2b8e53", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "22feb923-5646-44d8-bf64-bacea2cee9cb", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "22feb923-5646-44d8-bf64-bacea2cee9cb", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Rose", "17", "75.5"]}}
+{"txid": "22feb923-5646-44d8-bf64-bacea2cee9cb", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "f1b40cc1-e30e-4560-8ffc-bb4b942317ab", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "f1b40cc1-e30e-4560-8ffc-bb4b942317ab", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["4", "Ming", "23", "95.5"]}}
+{"txid": "f1b40cc1-e30e-4560-8ffc-bb4b942317ab", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "31e74c85-722c-4aa2-8872-f0a1b67089b1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "31e74c85-722c-4aa2-8872-f0a1b67089b1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "df2c4f6d-6cca-4206-81bc-d5b8f32fef0e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "df2c4f6d-6cca-4206-81bc-d5b8f32fef0e", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["7", "Alice", "20", "85.5"]}}
+{"txid": "df2c4f6d-6cca-4206-81bc-d5b8f32fef0e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "250d16cb-1cfc-45b5-818c-8b738bfe6b7e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "250d16cb-1cfc-45b5-818c-8b738bfe6b7e", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Rose", "17", "75.5"]}}
+{"txid": "250d16cb-1cfc-45b5-818c-8b738bfe6b7e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "fcbd26b5-96b7-4cbd-8aef-138d40d66e15", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "fcbd26b5-96b7-4cbd-8aef-138d40d66e15", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["4", "Ming", "23", "95.5"]}}
+{"txid": "fcbd26b5-96b7-4cbd-8aef-138d40d66e15", "op": "COMMIT", "table": null, "payload": {}}
 {"txid": "ba67da32-6bf1-4eb9-a860-542af2900115", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "ba67da32-6bf1-4eb9-a860-542af2900115", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "User1", "29", "58.5"]}}
 {"txid": "ba67da32-6bf1-4eb9-a860-542af2900115", "op": "COMMIT", "table": null, "payload": {}}
@@ -31149,3 +31172,15 @@
 {"txid": "62043935-8b8d-4eed-b7ec-2c7d740a8a03", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "62043935-8b8d-4eed-b7ec-2c7d740a8a03", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["10000", "User10000", "17", "76.4"]}}
 {"txid": "62043935-8b8d-4eed-b7ec-2c7d740a8a03", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "61901f54-9883-4b5b-9baf-edcb742291fc", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "61901f54-9883-4b5b-9baf-edcb742291fc", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["5", "Peter", "19", "80.5"]}}
+{"txid": "61901f54-9883-4b5b-9baf-edcb742291fc", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "097b8780-8a0b-457b-99c6-9b1c0111c77c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "097b8780-8a0b-457b-99c6-9b1c0111c77c", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["6", "Rohue", "19", "92.0"]}}
+{"txid": "097b8780-8a0b-457b-99c6-9b1c0111c77c", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "5dba3845-031d-465d-806c-abb2d029cbb9", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "5dba3845-031d-465d-806c-abb2d029cbb9", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["5", "Peter", "19", "80.5"]}}
+{"txid": "5dba3845-031d-465d-806c-abb2d029cbb9", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "991ebc44-26a4-4aa1-bafb-71703acf2212", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "991ebc44-26a4-4aa1-bafb-71703acf2212", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["6", "Rohue", "19", "92.0"]}}
+{"txid": "991ebc44-26a4-4aa1-bafb-71703acf2212", "op": "COMMIT", "table": null, "payload": {}}

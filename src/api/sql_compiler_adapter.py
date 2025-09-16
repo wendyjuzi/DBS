@@ -514,11 +514,6 @@ class SQLCompilerAdapter:
             pass
         # 简易事务控制语句直通处理
         upper_sql = sql.upper().rstrip(';')
-        # IMPORT/EXPORT 在编译器之外直接处理
-        if upper_sql.startswith("IMPORT TABLE "):
-            return self._handle_import_table(sql)
-        if upper_sql.startswith("EXPORT TABLE "):
-            return self._handle_export_table(sql)
         # 视图定义/删除直通处理（先于编译器）
         if upper_sql.startswith("DROP TABLE "):
             return self._handle_drop_table_fast(sql)
