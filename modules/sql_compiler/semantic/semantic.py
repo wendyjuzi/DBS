@@ -88,12 +88,14 @@ class Catalog:
 
     def create_view(self, view_name, columns, query, materialized=False):
         """创建视图"""
-        if view_name in self.views:
+        key = str(view_name)
+        up = key.upper()
+        if up in self.views or key in self.views:
             raise SemanticError("ViewError", view_name, "视图已存在")
-        if view_name in self.tables:
+        if up in self.tables or key in self.tables:
             raise SemanticError("ViewError", view_name, "视图名与已存在的表名冲突")
         
-        self.views[view_name] = {
+        self.views[up] = {
             'columns': columns,
             'query': query,
             'materialized': materialized
@@ -101,20 +103,30 @@ class Catalog:
 
     def drop_view(self, view_name):
         """删除视图"""
-        if view_name not in self.views:
+        key = str(view_name)
+        up = key.upper()
+        if up not in self.views and key not in self.views:
             raise SemanticError("ViewError", view_name, "要删除的视图不存在")
-        
-        del self.views[view_name]
+        # 优先按规范化键删除
+        if up in self.views:
+            del self.views[up]
+        elif key in self.views:
+            del self.views[key]
 
     def has_view(self, view_name):
         """检查视图是否存在"""
-        return view_name in self.views
+        key = str(view_name)
+        up = key.upper()
+        return up in self.views or key in self.views
 
     def get_view_columns(self, view_name):
         """获取视图的列信息"""
-        if view_name not in self.views:
+        key = str(view_name)
+        up = key.upper()
+        if up not in self.views and key not in self.views:
             return {}
-        return self.views[view_name]['columns']
+        ent = self.views.get(up) or self.views.get(key) or {}
+        return ent.get('columns', {})
 
     def create_procedure(self, proc_name, parameters, body, return_type=None, is_function=False):
         """创建存储过程或函数"""
@@ -523,6 +535,11 @@ class SemanticAnalyzer:
         if from_node:
             main_table = from_node.value
             if not self.catalog.has_table(main_table):
+                # 允许 FROM 引用视图名称
+                if hasattr(self.catalog, 'has_view') and self.catalog.has_view(main_table):
+                    print(f"[OK] FROM 视图 {main_table} 语义检查通过")
+                    # 视图内部查询在 CREATE VIEW 时已做过语义检查；此处直接放行
+                    return
                 raise SemanticError(
                     "TableError", main_table, f"表 '{main_table}' 不存在",
                     available_tables=self._get_available_tables(),

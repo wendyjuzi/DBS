@@ -699,6 +699,42 @@ class SQLCompilerAdapter:
                         result = {"affected_rows": 0, "metadata": {"message": "INSERT 语句不完整，已忽略"}}
                 else:
                     # 在非事务或不缓冲的语句直接执行，带路径选择与EXPLAIN
+                    # 视图解析：当 SELECT 的表名是视图时，改为执行视图内查询
+                    if executor_plan.get("type") == "SELECT":
+                        try:
+                            tname = (executor_plan.get("table") or "").upper()
+                            views = getattr(self.semantic_analyzer, 'catalog', None)
+                            if views and hasattr(views, 'has_view') and views.has_view(tname):
+                                vinfo = views.views.get(tname, {}) or views.views.get(str(tname).upper(), {})
+                                vquery = vinfo.get('query')
+                                if vquery is not None:
+                                    # 使用编译器对视图的查询 AST 生成计划并执行
+                                    import importlib
+                                    PlannerCls = None
+                                    try:
+                                        mod = importlib.import_module('modules.sql_compiler.planner.planner')
+                                        PlannerCls = getattr(mod, 'Planner', None)
+                                    except Exception:
+                                        PlannerCls = None
+                                    logical_plans = []
+                                    if PlannerCls and hasattr(vquery, 'to_dict'):
+                                        ast_dicts = [vquery.to_dict()]
+                                        planner = PlannerCls(ast_dicts, enable_optimization=True)
+                                        logical_plans = planner.generate_plan()
+                                    # 仅取第一条计划
+                                    if logical_plans:
+                                        op = logical_plans[0]
+                                        try:
+                                            exec_plan = self._convert_plan_to_executor_format(op)
+                                        except Exception:
+                                            exec_plan = op.to_dict() if hasattr(op, 'to_dict') else {}
+                                        result = self._execute_with_index_optimization(self._choose_path(exec_plan))
+                                        results.append(result)
+                                        continue
+                                    # 若无法生成计划则退回直接按表名执行（让后续路径继续）
+                        except Exception:
+                            # 视图扩展失败则按原计划继续
+                            pass
                     # INSERT 的唯一性校验
                     if executor_plan.get("type") == "INSERT":
                         table = executor_plan.get("table")
