@@ -514,6 +514,11 @@ class SQLCompilerAdapter:
             pass
         # 简易事务控制语句直通处理
         upper_sql = sql.upper().rstrip(';')
+        # IMPORT/EXPORT 在编译器之外直接处理
+        if upper_sql.startswith("IMPORT TABLE "):
+            return self._handle_import_table(sql)
+        if upper_sql.startswith("EXPORT TABLE "):
+            return self._handle_export_table(sql)
         # 视图定义/删除直通处理（先于编译器）
         if upper_sql.startswith("DROP TABLE "):
             return self._handle_drop_table_fast(sql)
@@ -1624,6 +1629,110 @@ class SQLCompilerAdapter:
             return {"affected_rows": len(rows), "data": rows, "metadata": {"columns": ["table", "col_indices"]}}
         except Exception as e:
             raise ExecutionError(f"SHOW COMPOSITE INDEXES 失败: {e}")
+
+    def _handle_export_table(self, sql: str) -> Dict[str, Any]:
+        try:
+            up = sql.strip().rstrip(';')
+            parts = up.split()
+            if len(parts) < 6 or parts[0].upper() != 'EXPORT' or parts[1].upper() != 'TABLE' or parts[3].upper() != 'TO':
+                raise SQLSyntaxError("语法: EXPORT TABLE table TO csv/json PATH 'file'")
+            table = parts[2]
+            fmt = parts[4].lower()
+            import re
+            m = re.search(r"PATH\s+'([^']+)'", up, re.IGNORECASE)
+            if m:
+                path = m.group(1)
+            else:
+                raise SQLSyntaxError("缺少 PATH 'file'")
+            ok = self.hybrid_executor.export_table(table.upper(), fmt, path)
+            msg = f"表 {table} 导出到 {path}" if ok else "导出失败"
+            return {"affected_rows": 0, "metadata": {"message": msg}}
+        except Exception as e:
+            raise ExecutionError(f"EXPORT 失败: {e}")
+
+    def _handle_import_table(self, sql: str) -> Dict[str, Any]:
+        try:
+            up = sql.strip().rstrip(';')
+            parts = up.split()
+            if len(parts) < 6 or parts[0].upper() != 'IMPORT' or parts[1].upper() != 'TABLE' or parts[3].upper() != 'FROM':
+                raise SQLSyntaxError("语法: IMPORT TABLE table FROM csv/json PATH 'file'")
+            table = parts[2].upper()
+            fmt = parts[4].lower()
+            import re, csv, json
+            m = re.search(r"PATH\s+'([^']+)'", up, re.IGNORECASE)
+            if not m:
+                raise SQLSyntaxError("缺少 PATH 'file'")
+            path = m.group(1)
+            # 确保表存在
+            if table not in getattr(self.hybrid_executor, 'table_columns', {}):
+                if fmt == 'csv':
+                    with open(path, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        headers = next(reader, [])
+                    if not headers:
+                        raise ExecutionError("无法从CSV推断表结构，且目标表不存在")
+                    cols = ", ".join([f"{h} STRING" for h in headers])
+                    self.execute(f"CREATE TABLE {table} ({cols});")
+                else:
+                    raise ExecutionError("目标表不存在，且非CSV无法推断结构")
+            # 导入（批量插入）
+            inserted = 0
+            cols = self.hybrid_executor.table_columns.get(table, [])
+            batch: list[list[str]] = []
+            batch_size = 1000
+            def _flush_batch():
+                nonlocal inserted, batch
+                if not batch:
+                    return
+                try:
+                    # 直接调用执行引擎批量插入，绕过SQL解析
+                    inserted += int(self.hybrid_executor.insert_many(table, [list(map(str, r)) for r in batch]))
+                except Exception:
+                    # 回退逐条
+                    for r in batch:
+                        try:
+                            self.hybrid_executor.insert_many(table, [list(map(str, r))])
+                            inserted += 1
+                        except Exception:
+                            pass
+                finally:
+                    batch = []
+
+            if fmt == 'csv':
+                with open(path, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    headers = next(reader, None)
+                    for row in reader:
+                        vals = row
+                        # 对长度不匹配做截断/填充
+                        if len(vals) < len(cols):
+                            vals = vals + [''] * (len(cols) - len(vals))
+                        elif len(vals) > len(cols):
+                            vals = vals[:len(cols)]
+                        batch.append([str(v) for v in vals])
+                        if len(batch) >= batch_size:
+                            _flush_batch()
+                _flush_batch()
+            elif fmt == 'json':
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    data = data.get('rows', [])
+                for obj in data:
+                    vals = [obj.get(c, '') for c in cols]
+                    if len(vals) < len(cols):
+                        vals = vals + [''] * (len(cols) - len(vals))
+                    elif len(vals) > len(cols):
+                        vals = vals[:len(cols)]
+                    batch.append([str(v) for v in vals])
+                    if len(batch) >= batch_size:
+                        _flush_batch()
+                _flush_batch()
+            else:
+                raise SQLSyntaxError("仅支持 csv/json")
+            return {"affected_rows": inserted, "metadata": {"message": f"导入完成: {inserted} 行"}}
+        except Exception as e:
+            raise ExecutionError(f"IMPORT 失败: {e}")
 
     def _handle_create_composite_index(self, sql: str) -> Dict[str, Any]:
         # 语法（简化版）：CREATE COMPOSITE INDEX idx ON table(col1,col2,...);

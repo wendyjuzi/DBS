@@ -53,6 +53,11 @@ class DatabaseGUI:
             "storage": "未连接",
             "executor": "未连接"
         }
+        
+        # SQL历史记录
+        self.sql_history = []  # 存储历史SQL语句
+        self.history_index = -1  # 当前历史索引，-1表示最新
+        self.current_sql = ""  # 当前正在编辑的SQL
 
         # 创建界面
         self.create_widgets()
@@ -178,6 +183,8 @@ SELECT id, name, score FROM students WHERE age > 18;"""
                    command=self.load_sample_sql).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="加载文件",
                    command=self.load_sql_file).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="历史",
+                   command=self.show_history_dialog).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="EXPLAIN",
                    command=self.explain_sql).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="导出结果",
@@ -703,6 +710,8 @@ SELECT id, name, score FROM students WHERE age > 18;"""
         menu_exec.add_command(label="清空输入", command=self.clear_sql)
         menu_exec.add_command(label="加载示例", command=self.load_sample_sql)
         menu_exec.add_separator()
+        menu_exec.add_command(label="SQL历史记录...", command=self.show_history_dialog)
+        menu_exec.add_separator()
         menu_exec.add_command(label="导出结果...", command=self.export_results)
         menubar.add_cascade(label="执行", menu=menu_exec)
 
@@ -1064,6 +1073,9 @@ SELECT id, name, score FROM students WHERE age > 18;"""
         if not sql:
             messagebox.showwarning("警告", "请输入SQL语句")
             return
+
+        # 添加到历史记录
+        self.add_to_history(sql)
 
         # 清空之前的结果
         self.result_text.delete(1.0, tk.END)
@@ -1699,6 +1711,12 @@ CreateTableStatement
         self.sql_text.bind('<KeyRelease>', self.on_key_release)
         self.sql_text.bind('<Control-space>', self.show_autocomplete)
         
+        # 绑定历史记录导航键
+        self.sql_text.bind('<Up>', self.navigate_history_up)
+        self.sql_text.bind('<Down>', self.navigate_history_down)
+        self.sql_text.bind('<Control-Up>', self.force_navigate_history_up)
+        self.sql_text.bind('<Control-Down>', self.force_navigate_history_down)
+        
         # 创建补全弹窗（初始隐藏）
         self.autocomplete_window = None
         self.autocomplete_listbox = None
@@ -2062,6 +2080,212 @@ CreateTableStatement
         """隐藏自动补全窗口"""
         if self.autocomplete_window:
             self.autocomplete_window.withdraw()
+
+    # ===== SQL历史记录功能 =====
+    
+    def navigate_history_up(self, event):
+        """向上导航历史记录（较旧的命令）"""
+        if not self.sql_history:
+            return "break"  # 阻止默认事件处理
+        
+        # 检查光标是否在文本的特定位置
+        cursor_pos = self.sql_text.index(tk.INSERT)
+        line, col = map(int, cursor_pos.split('.'))
+        
+        # 如果光标在第一行且不在开头，或者光标在中间行，则允许正常的光标移动
+        if (line == 1 and col > 0) or line > 1:
+            # 检查是否在编辑多行SQL
+            current_text = self.sql_text.get("1.0", tk.END).strip()
+            if current_text and '\n' in current_text:
+                # 多行编辑模式：允许正常的光标移动，不触发历史导航
+                return None
+        
+        # 如果当前在最新位置，保存当前输入
+        if self.history_index == -1:
+            self.current_sql = self.sql_text.get("1.0", tk.END).strip()
+        
+        # 向上移动历史索引
+        if self.history_index < len(self.sql_history) - 1:
+            self.history_index += 1
+            self.load_history_sql()
+        
+        return "break"  # 阻止默认的上箭头行为
+    
+    def navigate_history_down(self, event):
+        """向下导航历史记录（较新的命令）"""
+        if not self.sql_history:
+            return "break"
+        
+        # 检查光标位置，如果在多行编辑模式，允许正常光标移动
+        cursor_pos = self.sql_text.index(tk.INSERT)
+        line, col = map(int, cursor_pos.split('.'))
+        
+        if (line == 1 and col > 0) or line > 1:
+            current_text = self.sql_text.get("1.0", tk.END).strip()
+            if current_text and '\n' in current_text:
+                # 多行编辑模式：允许正常的光标移动
+                return None
+        
+        # 向下移动历史索引
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.load_history_sql()
+        elif self.history_index == 0:
+            # 回到最新位置，恢复当前编辑的SQL
+            self.history_index = -1
+            self.sql_text.delete("1.0", tk.END)
+            self.sql_text.insert("1.0", self.current_sql)
+        
+        return "break"  # 阻止默认的下箭头行为
+    
+    def force_navigate_history_up(self, event):
+        """强制向上导航历史记录（忽略光标位置）"""
+        if not self.sql_history:
+            return "break"
+        
+        # 如果当前在最新位置，保存当前输入
+        if self.history_index == -1:
+            self.current_sql = self.sql_text.get("1.0", tk.END).strip()
+        
+        # 向上移动历史索引
+        if self.history_index < len(self.sql_history) - 1:
+            self.history_index += 1
+            self.load_history_sql()
+        
+        return "break"
+    
+    def force_navigate_history_down(self, event):
+        """强制向下导航历史记录（忽略光标位置）"""
+        if not self.sql_history:
+            return "break"
+        
+        # 向下移动历史索引
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.load_history_sql()
+        elif self.history_index == 0:
+            # 回到最新位置，恢复当前编辑的SQL
+            self.history_index = -1
+            self.sql_text.delete("1.0", tk.END)
+            self.sql_text.insert("1.0", self.current_sql)
+        
+        return "break"
+    
+    def load_history_sql(self):
+        """加载历史SQL到输入框"""
+        if 0 <= self.history_index < len(self.sql_history):
+            # 从历史记录末尾开始计算索引（最新的在末尾）
+            sql = self.sql_history[-(self.history_index + 1)]
+            self.sql_text.delete("1.0", tk.END)
+            self.sql_text.insert("1.0", sql)
+            # 移动光标到末尾
+            self.sql_text.mark_set(tk.INSERT, tk.END)
+    
+    def add_to_history(self, sql):
+        """添加SQL到历史记录"""
+        if not sql or not sql.strip():
+            return
+        
+        sql = sql.strip()
+        
+        # 避免重复添加相同的SQL
+        if self.sql_history and self.sql_history[-1] == sql:
+            return
+        
+        # 添加到历史记录
+        self.sql_history.append(sql)
+        
+        # 限制历史记录长度（保留最近100条）
+        if len(self.sql_history) > 100:
+            self.sql_history.pop(0)
+        
+        # 重置历史索引
+        self.history_index = -1
+        self.current_sql = ""
+        
+        # 显示历史记录状态
+        self.log(f"✓ SQL已添加到历史记录 (共{len(self.sql_history)}条)")
+    
+    def show_history_dialog(self):
+        """显示历史记录对话框"""
+        if not self.sql_history:
+            messagebox.showinfo("历史记录", "暂无SQL执行历史")
+            return
+        
+        # 创建历史记录窗口
+        history_window = tk.Toplevel(self.root)
+        history_window.title("SQL执行历史")
+        history_window.geometry("800x600")
+        history_window.resizable(True, True)
+        
+        # 创建主框架
+        main_frame = ttk.Frame(history_window)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # 标题标签
+        title_label = ttk.Label(main_frame, text=f"SQL执行历史 (共{len(self.sql_history)}条)", 
+                               font=("Arial", 12, "bold"))
+        title_label.pack(pady=(0, 5))
+        
+        # 使用说明
+        help_label = ttk.Label(main_frame, 
+                              text="💡 提示：↑/↓ 键在单行时浏览历史，多行时移动光标 | Ctrl+↑/↓ 强制浏览历史", 
+                              font=("Arial", 9), foreground="gray")
+        help_label.pack(pady=(0, 10))
+        
+        # 创建列表框和滚动条
+        listbox_frame = ttk.Frame(main_frame)
+        listbox_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(listbox_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        history_listbox = tk.Listbox(listbox_frame, yscrollcommand=scrollbar.set,
+                                    font=("Consolas", 10))
+        history_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=history_listbox.yview)
+        
+        # 添加历史记录到列表（最新的在上面）
+        for i, sql in enumerate(reversed(self.sql_history)):
+            # 截断长SQL以便显示
+            display_sql = sql.replace('\n', ' ').replace('\r', '')
+            if len(display_sql) > 100:
+                display_sql = display_sql[:97] + "..."
+            history_listbox.insert(tk.END, f"{len(self.sql_history)-i:3d}. {display_sql}")
+        
+        # 按钮框架
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def use_selected():
+            """使用选中的历史记录"""
+            selection = history_listbox.curselection()
+            if selection:
+                index = selection[0]
+                # 计算实际的历史索引（因为显示是反序的）
+                actual_index = len(self.sql_history) - 1 - index
+                sql = self.sql_history[actual_index]
+                
+                # 插入到主界面
+                self.sql_text.delete("1.0", tk.END)
+                self.sql_text.insert("1.0", sql)
+                history_window.destroy()
+        
+        def clear_history():
+            """清空历史记录"""
+            if messagebox.askyesno("确认", "确定要清空所有历史记录吗？"):
+                self.sql_history.clear()
+                self.history_index = -1
+                self.current_sql = ""
+                history_window.destroy()
+                messagebox.showinfo("成功", "历史记录已清空")
+        
+        ttk.Button(button_frame, text="使用选中项", command=use_selected).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="清空历史", command=clear_history).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="关闭", command=history_window.destroy).pack(side=tk.RIGHT)
+        
+        # 双击使用历史记录
+        history_listbox.bind('<Double-Button-1>', lambda e: use_selected())
 
     def classify_token(self, word: str) -> str:
         """分类token"""
