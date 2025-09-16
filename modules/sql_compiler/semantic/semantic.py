@@ -421,19 +421,38 @@ class SemanticAnalyzer:
             elif expected_type == "INT":
                 # 跳过触发器引用（OLD.column, NEW.column）的类型检查
                 if not (str(val).startswith("OLD.") or str(val).startswith("NEW.")):
-                    if not str(val).isdigit():
+                    # 支持NULL值
+                    if str(val).upper() == "NULL":
+                        pass  # NULL值允许插入任何列
+                    elif not str(val).isdigit():
                         raise SemanticError(
                             "TypeError", col, f"期望 INT, 但得到 {val}",
                             available_tables=self._get_available_tables(),
                             available_columns=self._get_available_columns()
                         )
             elif expected_type == "VARCHAR":
-                if not isinstance(val, str):
+                # 支持NULL值
+                if str(val).upper() == "NULL":
+                    pass  # NULL值允许插入任何列
+                elif not isinstance(val, str):
                     raise SemanticError(
                         "TypeError", col, f"期望 VARCHAR, 但得到 {val}",
                         available_tables=self._get_available_tables(),
                         available_columns=self._get_available_columns()
                     )
+            elif expected_type == "DOUBLE":
+                # 支持NULL值
+                if str(val).upper() == "NULL":
+                    pass  # NULL值允许插入任何列
+                else:
+                    try:
+                        float(val)
+                    except ValueError:
+                        raise SemanticError(
+                            "TypeError", col, f"期望 DOUBLE, 但得到 {val}",
+                            available_tables=self._get_available_tables(),
+                            available_columns=self._get_available_columns()
+                        )
 
         # 检查主键约束
         primary_keys = self.catalog.get_primary_keys(table_name)
@@ -1325,6 +1344,16 @@ class SemanticAnalyzer:
     def _check_expression_columns(self, expression, tables, table_aliases):
         """检查表达式中的列是否存在"""
         import re
+        
+        # 首先检查整个表达式是否是qualified column name (table.column)
+        if '.' in str(expression):
+            if not self._column_exists_in_tables_with_aliases(tables, str(expression), table_aliases):
+                raise SemanticError(
+                    "ColumnError", str(expression), "列不存在于任何表中",
+                    available_tables=self._get_available_tables(),
+                    available_columns=self._get_available_columns()
+                )
+            return  # 如果是qualified column name，直接返回
         
         # 提取表达式中的标识符（可能的列名）
         # 匹配标识符，但排除数字常量

@@ -263,7 +263,12 @@ class ASTNode:
             left = next((c.value for c in node.children if c.node_type == "LEFT"), None)
             op = node.value
             right = next((c.value for c in node.children if c.node_type == "RIGHT"), None)
-            return {"left": left, "op": op, "right": right}
+            
+            # 处理NULL比较
+            if op in ["IS NULL", "IS NOT NULL"]:
+                return {"left": left, "op": op, "right": None}
+            else:
+                return {"left": left, "op": op, "right": right}
             
         elif node.node_type == "LOGICAL_OP":
             # 逻辑运算符: AND/OR
@@ -604,6 +609,10 @@ class Parser:
                 self.expect("DELIMITER", ".")
                 column = self.expect("IDENTIFIER").lexeme
                 values.append(f"{prefix}.{column}")
+            elif val_token.type == "KEYWORD" and val_token.lexeme.upper() == "NULL":
+                # 支持NULL值
+                values.append("NULL")
+                self.advance()
             elif val_token.type not in ["CONST", "IDENTIFIER"]:
                 raise ParseError("Expected constant or identifier", val_token)
             else:
@@ -962,8 +971,8 @@ class Parser:
             self.expect("DELIMITER", ")")
             return expr
         
-        # 解析左操作数
-        left = self.parse_qualified_identifier()
+        # 解析左操作数（可能是列名、常量或NULL）
+        left = self.parse_value_or_identifier()
         
         # 检查操作符类型
         if not self.current_token:
@@ -977,6 +986,9 @@ class Parser:
             return self.parse_like_expression(left)
         elif self.current_token.type == "OPERATOR":
             return self.parse_simple_comparison(left)
+        elif (self.current_token.type == "KEYWORD" and 
+              self.current_token.lexeme.upper() in ["IS", "IS NOT"]):
+            return self.parse_null_comparison(left)
         else:
             raise ParseError(f"Unexpected token in WHERE clause: {self.current_token.lexeme}")
     
@@ -1019,6 +1031,20 @@ class Parser:
         pattern = self.parse_value_or_identifier()
         return ASTNode("LIKE", None, [ASTNode("LEFT", left), ASTNode("PATTERN", pattern)])
     
+    def parse_null_comparison(self, left):
+        """解析 NULL 比较 (IS NULL, IS NOT NULL)"""
+        if self.current_token.lexeme.upper() == "IS":
+            self.advance()  # 跳过 IS
+            if self.current_token and self.current_token.lexeme.upper() == "NOT":
+                self.advance()  # 跳过 NOT
+                self.expect("KEYWORD", "NULL")
+                return ASTNode("COMPARISON", "IS NOT NULL", [ASTNode("LEFT", left)])
+            else:
+                self.expect("KEYWORD", "NULL")
+                return ASTNode("COMPARISON", "IS NULL", [ASTNode("LEFT", left)])
+        else:
+            raise ParseError("Expected IS or IS NOT after column name for NULL comparison")
+    
     def parse_value_or_identifier(self):
         """解析值或标识符"""
         if self.current_token.type == "CONST":
@@ -1038,6 +1064,11 @@ class Parser:
                 return f"{prefix}.{column}"
             else:
                 return prefix
+        elif (self.current_token.type == "KEYWORD" and 
+              self.current_token.lexeme.upper() == "NULL"):
+            # 支持NULL值
+            self.advance()
+            return "NULL"
         else:
             raise ParseError(f"Expected value or identifier, got {self.current_token.type}")
     

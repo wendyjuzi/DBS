@@ -647,3 +647,211 @@
 {"txid": "158d6507-1111-4055-b25b-48bb04ffb7c5", "op": "COMMIT", "table": null, "payload": {}}
 {"txid": "17d20877-ad2f-457b-9b8b-adf6d351bdf0", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "17d20877-ad2f-457b-9b8b-adf6d351bdf0", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "fa8acce5-15ae-4a36-aba8-92f5c393dea4", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "fa8acce5-15ae-4a36-aba8-92f5c393dea4", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["1", "Laptop", "Electronics", "999.99", "50", "High-performance laptop"]}}
+{"txid": "fa8acce5-15ae-4a36-aba8-92f5c393dea4", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9e313aab-d36a-4217-ba63-dfb4db7df4c0", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9e313aab-d36a-4217-ba63-dfb4db7df4c0", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["2", "Mouse", "Electronics", "29.99", "200", "Wireless mouse"]}}
+{"txid": "9e313aab-d36a-4217-ba63-dfb4db7df4c0", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "a9ab15fd-cae9-41d2-84ed-6f2c458fd275", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "a9ab15fd-cae9-41d2-84ed-6f2c458fd275", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["3", "Keyboard", "Electronics", "79.99", "150", "Mechanical keyboard"]}}
+{"txid": "a9ab15fd-cae9-41d2-84ed-6f2c458fd275", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "7e23ebfc-e08c-4bb9-b0ac-6860524b5fad", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "7e23ebfc-e08c-4bb9-b0ac-6860524b5fad", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["4", "Book", "Education", "19.99", "300", "Programming book"]}}
+{"txid": "7e23ebfc-e08c-4bb9-b0ac-6860524b5fad", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b05f81f3-4e64-4465-a19d-48aff6660009", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b05f81f3-4e64-4465-a19d-48aff6660009", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["5", "Pen", "Office", "2.99", "1000", "Blue ink pen"]}}
+{"txid": "b05f81f3-4e64-4465-a19d-48aff6660009", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b2c40c95-5647-4733-afc9-88d44ca5d416", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b2c40c95-5647-4733-afc9-88d44ca5d416", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["6", "Monitor", "Electronics", "299.99", "75", "4K monitor"]}}
+{"txid": "b2c40c95-5647-4733-afc9-88d44ca5d416", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "747b457a-142d-4d89-9dab-3e408bd9f5ea", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "747b457a-142d-4d89-9dab-3e408bd9f5ea", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["7", "Chair", "Furniture", "199.99", "25", "Ergonomic chair"]}}
+{"txid": "747b457a-142d-4d89-9dab-3e408bd9f5ea", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "3f3b634e-d47e-43cd-a48c-fb7dc1cb0798", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "3f3b634e-d47e-43cd-a48c-fb7dc1cb0798", "op": "INSERT", "table": "PRODUCTS", "payload": {"values": ["8", "Desk", "Furniture", "399.99", "15", "Standing desk"]}}
+{"txid": "3f3b634e-d47e-43cd-a48c-fb7dc1cb0798", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "abfca899-23a1-4873-ad8f-bcb2cf6406eb", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "abfca899-23a1-4873-ad8f-bcb2cf6406eb", "op": "UPDATE", "table": "PRODUCTS", "payload": {"set": [["PRICE", "PRICE * 1.1"]], "where": [{"column": "CATEGORY", "op": "=", "value": "Electronics"}]}}
+{"txid": "abfca899-23a1-4873-ad8f-bcb2cf6406eb", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "396f04ec-0eec-4dd1-b2df-fab9231a08ff", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "396f04ec-0eec-4dd1-b2df-fab9231a08ff", "op": "UPDATE", "table": "PRODUCTS", "payload": {"set": [["STOCK", "100"]], "where": [{"column": "NAME", "op": "=", "value": "Laptop"}]}}
+{"txid": "396f04ec-0eec-4dd1-b2df-fab9231a08ff", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "107250c1-1d0a-4838-961d-8556b1745e21", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "107250c1-1d0a-4838-961d-8556b1745e21", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "cb85d5d2-6328-4c65-b78d-5a67168d9992", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "cb85d5d2-6328-4c65-b78d-5a67168d9992", "op": "UPDATE", "table": "PRODUCTS", "payload": {"set": [["PRICE", "1200"]], "where": [{"column": "NAME", "op": "=", "value": "Laptop"}]}}
+{"txid": "cb85d5d2-6328-4c65-b78d-5a67168d9992", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "864ac491-56dc-48a2-ad8e-8ec18570e3e2", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "864ac491-56dc-48a2-ad8e-8ec18570e3e2", "op": "INSERT", "table": "TEST_TABLE", "payload": {"values": ["1", "Alice", "25", "50000.0", "Engineering"]}}
+{"txid": "864ac491-56dc-48a2-ad8e-8ec18570e3e2", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "27de67ef-c471-4d95-90b1-6ab5b8bc67e1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "27de67ef-c471-4d95-90b1-6ab5b8bc67e1", "op": "INSERT", "table": "NULL_TEST_TABLE", "payload": {"values": ["1", "Alice", "25", "50000.0", "Engineering"]}}
+{"txid": "27de67ef-c471-4d95-90b1-6ab5b8bc67e1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "a5dfd127-064b-495b-a4df-4ea28dbdde7b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "a5dfd127-064b-495b-a4df-4ea28dbdde7b", "op": "INSERT", "table": "TEST_NULL_TABLE", "payload": {"values": ["1", "Alice", "25", "50000.0", "Engineering"]}}
+{"txid": "a5dfd127-064b-495b-a4df-4ea28dbdde7b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "40c41adc-ca48-4c4d-bdea-be8ac4a9a6e9", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "40c41adc-ca48-4c4d-bdea-be8ac4a9a6e9", "op": "INSERT", "table": "TEST_NULL_TABLE", "payload": {"values": ["2", "Bob", "NULL", "60000.0", "Marketing"]}}
+{"txid": "40c41adc-ca48-4c4d-bdea-be8ac4a9a6e9", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ad948fe7-e940-46d2-8905-06603107ee1e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ad948fe7-e940-46d2-8905-06603107ee1e", "op": "INSERT", "table": "TEST_NULL_TABLE", "payload": {"values": ["3", "Charlie", "30", "NULL", "Engineering"]}}
+{"txid": "ad948fe7-e940-46d2-8905-06603107ee1e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "f55ff358-eda1-46ef-9431-76ed77c9e803", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "f55ff358-eda1-46ef-9431-76ed77c9e803", "op": "INSERT", "table": "TEST_NULL_TABLE", "payload": {"values": ["4", "Diana", "28", "55000.0", "NULL"]}}
+{"txid": "f55ff358-eda1-46ef-9431-76ed77c9e803", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "f1929aa6-ca39-4a3b-be29-d2407fc4ae85", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "f1929aa6-ca39-4a3b-be29-d2407fc4ae85", "op": "INSERT", "table": "TEST_NULL_TABLE", "payload": {"values": ["5", "Eve", "NULL", "NULL", "Sales"]}}
+{"txid": "f1929aa6-ca39-4a3b-be29-d2407fc4ae85", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b1d6a6fe-3834-4e11-a4d2-3db8364a63ad", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b1d6a6fe-3834-4e11-a4d2-3db8364a63ad", "op": "INSERT", "table": "TEST_NULL_TABLE", "payload": {"values": ["6", "Frank", "35", "70000.0", "Engineering"]}}
+{"txid": "b1d6a6fe-3834-4e11-a4d2-3db8364a63ad", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "7e94a2fc-df7b-431f-8d7c-e467c7d26164", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "7e94a2fc-df7b-431f-8d7c-e467c7d26164", "op": "UPDATE", "table": "TEST_NULL_TABLE", "payload": {"set": [["AGE", "30"]], "where": [{"column": "AGE", "op": "IS NULL", "value": null}]}}
+{"txid": "7e94a2fc-df7b-431f-8d7c-e467c7d26164", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "eb4ab0d7-3475-478a-94ba-7cf2df44605a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "eb4ab0d7-3475-478a-94ba-7cf2df44605a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9d553f15-1b29-4701-9397-d5b8daa2819d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9d553f15-1b29-4701-9397-d5b8daa2819d", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "CS"]}}
+{"txid": "9d553f15-1b29-4701-9397-d5b8daa2819d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "32eee7e9-785a-4f8c-971b-583f2633656e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "32eee7e9-785a-4f8c-971b-583f2633656e", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["2", "Bob", "21", "Math"]}}
+{"txid": "32eee7e9-785a-4f8c-971b-583f2633656e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ce4b985c-992c-45c3-aef9-e5c953fae9fa", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ce4b985c-992c-45c3-aef9-e5c953fae9fa", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Charlie", "19", "Physics"]}}
+{"txid": "ce4b985c-992c-45c3-aef9-e5c953fae9fa", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "7a72de9b-e87e-4793-981e-e353cd60dd2e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "7a72de9b-e87e-4793-981e-e353cd60dd2e", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["4", "Diana", "22", "CS"]}}
+{"txid": "7a72de9b-e87e-4793-981e-e353cd60dd2e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "4e5eae82-84a9-4935-bc7f-18f00acf480c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "4e5eae82-84a9-4935-bc7f-18f00acf480c", "op": "INSERT", "table": "COURSES", "payload": {"values": ["101", "Database Systems", "3", "CS"]}}
+{"txid": "4e5eae82-84a9-4935-bc7f-18f00acf480c", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "461105bb-7f09-4f19-abd3-dfd562b6be98", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "461105bb-7f09-4f19-abd3-dfd562b6be98", "op": "INSERT", "table": "COURSES", "payload": {"values": ["102", "Linear Algebra", "4", "Math"]}}
+{"txid": "461105bb-7f09-4f19-abd3-dfd562b6be98", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "8cd3fe1a-5220-4fed-a57f-92666b9ff23e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "8cd3fe1a-5220-4fed-a57f-92666b9ff23e", "op": "INSERT", "table": "COURSES", "payload": {"values": ["103", "Quantum Physics", "3", "Physics"]}}
+{"txid": "8cd3fe1a-5220-4fed-a57f-92666b9ff23e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "1d86865c-cf03-41c1-93ab-e61bea89db94", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1d86865c-cf03-41c1-93ab-e61bea89db94", "op": "INSERT", "table": "COURSES", "payload": {"values": ["104", "Data Structures", "3", "CS"]}}
+{"txid": "1d86865c-cf03-41c1-93ab-e61bea89db94", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "7ae08a2c-a8cf-4f7c-826f-c8a645d8bd07", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "7ae08a2c-a8cf-4f7c-826f-c8a645d8bd07", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["1", "101", "85.5", "Fall2023"]}}
+{"txid": "7ae08a2c-a8cf-4f7c-826f-c8a645d8bd07", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "058899a6-a453-46e5-af2e-4a1c7e49424f", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "058899a6-a453-46e5-af2e-4a1c7e49424f", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["1", "104", "92.0", "Fall2023"]}}
+{"txid": "058899a6-a453-46e5-af2e-4a1c7e49424f", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "54416698-933c-4091-938b-94ffc6e444aa", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "54416698-933c-4091-938b-94ffc6e444aa", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["2", "102", "78.5", "Fall2023"]}}
+{"txid": "54416698-933c-4091-938b-94ffc6e444aa", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "bb9e6251-fd61-49ae-b423-17afe790906d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "bb9e6251-fd61-49ae-b423-17afe790906d", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["3", "103", "88.0", "Fall2023"]}}
+{"txid": "bb9e6251-fd61-49ae-b423-17afe790906d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "6a29cd9d-0633-4fc9-b4bc-bcd2d67f5bfa", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "6a29cd9d-0633-4fc9-b4bc-bcd2d67f5bfa", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "101", "90.5", "Fall2023"]}}
+{"txid": "6a29cd9d-0633-4fc9-b4bc-bcd2d67f5bfa", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "96cb8c17-11e1-43f9-b70d-716234742c5b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "96cb8c17-11e1-43f9-b70d-716234742c5b", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "104", "87.0", "Fall2023"]}}
+{"txid": "96cb8c17-11e1-43f9-b70d-716234742c5b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "333f87c9-699a-480f-9a0c-42fd0a2fd54c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "333f87c9-699a-480f-9a0c-42fd0a2fd54c", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "CS"]}}
+{"txid": "333f87c9-699a-480f-9a0c-42fd0a2fd54c", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "0931e174-0f37-4661-be94-fb6ae44e409a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "0931e174-0f37-4661-be94-fb6ae44e409a", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["2", "Bob", "21", "Math"]}}
+{"txid": "0931e174-0f37-4661-be94-fb6ae44e409a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "f400cc6a-e32e-4d09-8036-977b59259110", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "f400cc6a-e32e-4d09-8036-977b59259110", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Charlie", "19", "Physics"]}}
+{"txid": "f400cc6a-e32e-4d09-8036-977b59259110", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ac08926c-1061-46a1-a4a7-9155151dc1e0", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ac08926c-1061-46a1-a4a7-9155151dc1e0", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["4", "Diana", "22", "CS"]}}
+{"txid": "ac08926c-1061-46a1-a4a7-9155151dc1e0", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "d354f9fd-387a-4eb3-9128-37739cf0dd6d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "d354f9fd-387a-4eb3-9128-37739cf0dd6d", "op": "INSERT", "table": "COURSES", "payload": {"values": ["101", "Database Systems", "3", "CS"]}}
+{"txid": "d354f9fd-387a-4eb3-9128-37739cf0dd6d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "17cffea9-254b-4b9e-a275-1d00c2e21a47", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "17cffea9-254b-4b9e-a275-1d00c2e21a47", "op": "INSERT", "table": "COURSES", "payload": {"values": ["102", "Linear Algebra", "4", "Math"]}}
+{"txid": "17cffea9-254b-4b9e-a275-1d00c2e21a47", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "1b16f284-f540-4d5e-8650-4304730312a0", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1b16f284-f540-4d5e-8650-4304730312a0", "op": "INSERT", "table": "COURSES", "payload": {"values": ["103", "Quantum Physics", "3", "Physics"]}}
+{"txid": "1b16f284-f540-4d5e-8650-4304730312a0", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "901b6c95-6725-4df6-90a0-f0f43c9593f1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "901b6c95-6725-4df6-90a0-f0f43c9593f1", "op": "INSERT", "table": "COURSES", "payload": {"values": ["104", "Data Structures", "3", "CS"]}}
+{"txid": "901b6c95-6725-4df6-90a0-f0f43c9593f1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "82f0cfef-273f-4949-a9a8-f7d1bb0b49aa", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "82f0cfef-273f-4949-a9a8-f7d1bb0b49aa", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["1", "101", "85.5", "Fall2023"]}}
+{"txid": "82f0cfef-273f-4949-a9a8-f7d1bb0b49aa", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b0159795-e657-44ba-a2f5-4d0985b665f3", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b0159795-e657-44ba-a2f5-4d0985b665f3", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["1", "104", "92.0", "Fall2023"]}}
+{"txid": "b0159795-e657-44ba-a2f5-4d0985b665f3", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "8f3c70a7-771f-427e-ae5e-9e48ca763a57", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "8f3c70a7-771f-427e-ae5e-9e48ca763a57", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["2", "102", "78.5", "Fall2023"]}}
+{"txid": "8f3c70a7-771f-427e-ae5e-9e48ca763a57", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "051ff59e-c74c-4d2a-9d8c-af718fec93ca", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "051ff59e-c74c-4d2a-9d8c-af718fec93ca", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["3", "103", "88.0", "Fall2023"]}}
+{"txid": "051ff59e-c74c-4d2a-9d8c-af718fec93ca", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "69c1f075-bd60-40f0-8403-3379237477bc", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "69c1f075-bd60-40f0-8403-3379237477bc", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "101", "90.5", "Fall2023"]}}
+{"txid": "69c1f075-bd60-40f0-8403-3379237477bc", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9bdc5193-1223-42d6-b410-8dd9b527bd2d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9bdc5193-1223-42d6-b410-8dd9b527bd2d", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "104", "87.0", "Fall2023"]}}
+{"txid": "9bdc5193-1223-42d6-b410-8dd9b527bd2d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "545798b0-15de-4796-9c23-891874fdd6c8", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "545798b0-15de-4796-9c23-891874fdd6c8", "op": "INSERT", "table": "TEST_STUDENTS", "payload": {"values": ["1", "Alice"]}}
+{"txid": "545798b0-15de-4796-9c23-891874fdd6c8", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c0f1ffbf-54e4-4356-bc13-439ac257de01", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c0f1ffbf-54e4-4356-bc13-439ac257de01", "op": "INSERT", "table": "TEST_COURSES", "payload": {"values": ["101", "Math"]}}
+{"txid": "c0f1ffbf-54e4-4356-bc13-439ac257de01", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "19609533-f9ac-4fab-a468-0415821be2d1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "19609533-f9ac-4fab-a468-0415821be2d1", "op": "INSERT", "table": "TEST_ENROLLMENTS", "payload": {"values": ["1", "101"]}}
+{"txid": "19609533-f9ac-4fab-a468-0415821be2d1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ad162e88-816f-477b-9852-f4d97bd466d6", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ad162e88-816f-477b-9852-f4d97bd466d6", "op": "INSERT", "table": "TEST_STUDENTS", "payload": {"values": ["1", "Alice"]}}
+{"txid": "ad162e88-816f-477b-9852-f4d97bd466d6", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "5476c987-6781-4440-ba6b-44e493233995", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "5476c987-6781-4440-ba6b-44e493233995", "op": "INSERT", "table": "TEST_COURSES", "payload": {"values": ["101", "Math"]}}
+{"txid": "5476c987-6781-4440-ba6b-44e493233995", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b350160a-f889-4dff-87d8-a547c8bd18c0", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b350160a-f889-4dff-87d8-a547c8bd18c0", "op": "INSERT", "table": "TEST_ENROLLMENTS", "payload": {"values": ["1", "101"]}}
+{"txid": "b350160a-f889-4dff-87d8-a547c8bd18c0", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "d3c827c9-b8e1-4101-a221-6b6cc6bfde2d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "d3c827c9-b8e1-4101-a221-6b6cc6bfde2d", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "CS"]}}
+{"txid": "d3c827c9-b8e1-4101-a221-6b6cc6bfde2d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "72e766f0-8ed2-43d6-8d66-e4f12cf547ce", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "72e766f0-8ed2-43d6-8d66-e4f12cf547ce", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["2", "Bob", "21", "Math"]}}
+{"txid": "72e766f0-8ed2-43d6-8d66-e4f12cf547ce", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "fea276b9-5ac1-47aa-b19c-e6e46d554020", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "fea276b9-5ac1-47aa-b19c-e6e46d554020", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Charlie", "19", "Physics"]}}
+{"txid": "fea276b9-5ac1-47aa-b19c-e6e46d554020", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c3bf541f-c502-43b2-aff2-af60a90f8400", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c3bf541f-c502-43b2-aff2-af60a90f8400", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["4", "Diana", "22", "CS"]}}
+{"txid": "c3bf541f-c502-43b2-aff2-af60a90f8400", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "7ec3bce7-3047-4116-9bf0-c30364c469c7", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "7ec3bce7-3047-4116-9bf0-c30364c469c7", "op": "INSERT", "table": "COURSES", "payload": {"values": ["101", "Database Systems", "3", "CS"]}}
+{"txid": "7ec3bce7-3047-4116-9bf0-c30364c469c7", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "df60abdd-7d32-4e94-ae63-394e838f5a2b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "df60abdd-7d32-4e94-ae63-394e838f5a2b", "op": "INSERT", "table": "COURSES", "payload": {"values": ["102", "Linear Algebra", "4", "Math"]}}
+{"txid": "df60abdd-7d32-4e94-ae63-394e838f5a2b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "bd86185d-dd3b-4c49-96a8-e955e5005911", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "bd86185d-dd3b-4c49-96a8-e955e5005911", "op": "INSERT", "table": "COURSES", "payload": {"values": ["103", "Quantum Physics", "3", "Physics"]}}
+{"txid": "bd86185d-dd3b-4c49-96a8-e955e5005911", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "e8a0cea9-c14d-4e8f-9aeb-d66702ae4377", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "e8a0cea9-c14d-4e8f-9aeb-d66702ae4377", "op": "INSERT", "table": "COURSES", "payload": {"values": ["104", "Data Structures", "3", "CS"]}}
+{"txid": "e8a0cea9-c14d-4e8f-9aeb-d66702ae4377", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "ba8d0f6d-8c0e-457d-8a9a-3d0ec65c53de", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "ba8d0f6d-8c0e-457d-8a9a-3d0ec65c53de", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["1", "101", "85.5", "Fall2023"]}}
+{"txid": "ba8d0f6d-8c0e-457d-8a9a-3d0ec65c53de", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "4e1af55f-05b5-4fc0-b4bd-ef97bde0fb3c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "4e1af55f-05b5-4fc0-b4bd-ef97bde0fb3c", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["1", "104", "92.0", "Fall2023"]}}
+{"txid": "4e1af55f-05b5-4fc0-b4bd-ef97bde0fb3c", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "4e06ac8b-9f02-4ac9-890c-3b031635a74a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "4e06ac8b-9f02-4ac9-890c-3b031635a74a", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["2", "102", "78.5", "Fall2023"]}}
+{"txid": "4e06ac8b-9f02-4ac9-890c-3b031635a74a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "f07fa2fe-4dd8-4a3f-8a3c-682435c44cec", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "f07fa2fe-4dd8-4a3f-8a3c-682435c44cec", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["3", "103", "88.0", "Fall2023"]}}
+{"txid": "f07fa2fe-4dd8-4a3f-8a3c-682435c44cec", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "fab79273-e2d1-44b5-a169-62430950d92f", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "fab79273-e2d1-44b5-a169-62430950d92f", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "101", "90.5", "Fall2023"]}}
+{"txid": "fab79273-e2d1-44b5-a169-62430950d92f", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "6c260160-f22d-4b32-8400-f67e68af7739", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "6c260160-f22d-4b32-8400-f67e68af7739", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "104", "87.0", "Fall2023"]}}
+{"txid": "6c260160-f22d-4b32-8400-f67e68af7739", "op": "COMMIT", "table": null, "payload": {}}

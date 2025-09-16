@@ -330,6 +330,23 @@ class HybridExecutionEngine:
 
     def _python_filter(self, rows, pushdown: List[Tuple[int, str, str]]):
         def eval_cond(lhs: str, op: str, rhs: str) -> bool:
+            # 处理NULL值
+            if lhs == "NULL" or lhs is None:
+                if op == "IS NULL": return True
+                if op == "IS NOT NULL": return False
+                return False  # NULL与任何值比较都返回False
+            
+            if rhs == "NULL" or rhs is None:
+                if op == "=": return False  # 任何值都不等于NULL
+                if op == "!=": return True  # 任何值都不等于NULL
+                if op == "IS NULL": return False
+                if op == "IS NOT NULL": return True
+                return False  # NULL与任何值比较都返回False
+            
+            # 处理IS NULL和IS NOT NULL
+            if op == "IS NULL": return False
+            if op == "IS NOT NULL": return True
+            
             try:
                 ln = float(lhs); rn = float(rhs)
                 if op == "=": return ln == rn
@@ -533,6 +550,11 @@ class HybridExecutionEngine:
         processed_clause = _re.sub(r"\\bNOT\\b", "not", processed_clause, flags=_re.IGNORECASE)
         processed_clause = _re.sub(r"<>", "!=", processed_clause)
         processed_clause = _re.sub(r"(?<![<>!=])=(?![=])", "==", processed_clause)
+        
+        # 处理NULL值
+        processed_clause = _re.sub(r"\\bIS\\s+NULL\\b", "== 'NULL'", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\\bIS\\s+NOT\\s+NULL\\b", "!= 'NULL'", processed_clause, flags=_re.IGNORECASE)
+        
         try:
             return eval(f"lambda x: {processed_clause}")
         except Exception as e:
@@ -999,117 +1021,256 @@ class HybridExecutionEngine:
         if len(tables) < 2:
             raise ExecutionError("JOIN需要至少两个表")
         
-        # 目前支持两个表的内连接（可扩展）
-        if not (len(tables) == 2 and len(joins) == 1):
-            raise ExecutionError("暂不支持复杂的多表JOIN")
+        # 支持N表等值JOIN：动态选择可连接的边，构建累计结果
+        # 规范化表名
+        tables = [str(t).upper() for t in tables]
+        # 累计结果（可能从任意表开始）
+        accumulated_rows: List[List[str]] = []
+        accumulated_cols: List[str] = []  # qualified col names
+        accumulated_tables: set = set()
 
-        left_table = tables[0]
-        right_table = tables[1]
-        join_info = joins[0] or {}
-        on = join_info.get("on", {}) or {}
-
-        # 解析 ON 条件，允许 "T.COL" 或 "COL"（不带表名时尝试两侧匹配）
+        # 工具：解析 T.COL / COL
         def parse_col(ref: str) -> (str, str):
             if not ref:
                 return "", ""
             s = str(ref)
             if "." in s:
                 t, c = s.split(".", 1)
-                return t, c
+                return t.upper(), c
             return "", s
 
-        l_tbl_ref, l_col = parse_col(on.get("left"))
-        r_tbl_ref, r_col = parse_col(on.get("right"))
-        # 归一化：若未标明表，则按左->右顺序分配
-        if not l_tbl_ref:
-            l_tbl_ref = left_table
-        if not r_tbl_ref:
-            r_tbl_ref = right_table
-        if l_tbl_ref not in (left_table, right_table) or r_tbl_ref not in (left_table, right_table):
-            raise ExecutionError("JOIN 条件引用了未知表")
-        # 如果左右表被写反，则交换
-        if l_tbl_ref == right_table and r_tbl_ref == left_table:
-            left_table, right_table = right_table, left_table
-            l_tbl_ref, r_tbl_ref = r_tbl_ref, l_tbl_ref
-            l_col, r_col = r_col, l_col
-
-        # 准备两表列名
-        for t in (left_table, right_table):
-            if t not in self.table_columns:
-                self._ensure_table_cached(t)
-        left_cols = self.table_columns.get(left_table, [])
-        right_cols = self.table_columns.get(right_table, [])
-        if not left_cols or not right_cols:
-            raise ExecutionError("无法获取表结构用于JOIN")
-        try:
-            l_idx = left_cols.index(l_col)
-            r_idx = right_cols.index(r_col)
-        except ValueError:
-            raise ExecutionError("JOIN 列不存在于对应表中")
-
-        # 获取行
-        left_rows = self.executor.seq_scan(left_table)
-        right_rows = self.executor.seq_scan(right_table)
-
-        # 选择算法：hash 为默认
-        out_rows = []
-        if join_algo == "merge":
-            # 简化：将两侧排序后双指针（字符串比较）
-            lvals = [(r.get_values(), str(r.get_values()[l_idx]) if l_idx < len(r.get_values()) else "") for r in left_rows]
-            rvals = [(r.get_values(), str(r.get_values()[r_idx]) if r_idx < len(r.get_values()) else "") for r in right_rows]
-            lvals.sort(key=lambda x: x[1]); rvals.sort(key=lambda x: x[1])
-            i = j = 0
-            while i < len(lvals) and j < len(rvals):
-                lv = lvals[i][1]; rv = rvals[j][1]
-                if lv == rv:
-                    # 收集所有等值范围
-                    j2 = j
-                    while j2 < len(rvals) and rvals[j2][1] == rv:
-                        out_rows.append(lvals[i][0] + rvals[j2][0])
-                        j2 += 1
-                    i += 1
-                elif lv < rv:
-                    i += 1
+        # 复制 joins，动态消费
+        pending_joins = list(joins or [])
+        # 尝试初始化：若无累计表，则以首条可用连接的左侧表启动
+        def ensure_table_loaded(tname: str):
+            if tname not in self.table_columns:
+                self._ensure_table_cached(tname)
+        # 主循环：每次找一条与已累计表相接的 join；如果还未启动，则用该 join 的左表启动
+        iterations = 0
+        while pending_joins and iterations < 1000:
+            iterations += 1
+            progressed = False
+            for idx, j in enumerate(pending_joins):
+                on = (j or {}).get("on", {}) or {}
+                lt, lc = parse_col(on.get("left"))
+                rt, rc = parse_col(on.get("right"))
+                lt = lt.upper() if lt else lt
+                rt = rt.upper() if rt else rt
+                # 若尚未启动累计，则用左表启动
+                if not accumulated_tables:
+                    base = lt or rt
+                    if not base:
+                        continue
+                    base = base.upper()
+                    ensure_table_loaded(base)
+                    bcols = self.table_columns.get(base, [])
+                    accumulated_rows = [r.get_values() for r in self.executor.seq_scan(base)]
+                    accumulated_cols = [f"{base}.{c}" for c in bcols]
+                    accumulated_tables.add(base)
+                # 判断哪侧在累计内
+                left_in = lt in accumulated_tables if lt else False
+                right_in = rt in accumulated_tables if rt else False
+                # 推断另一侧表名
+                other_tbl = None
+                use_left_key = None
+                if left_in and (not right_in):
+                    other_tbl = rt
+                    use_left_key = (lt, lc)
+                elif right_in and (not left_in):
+                    other_tbl = lt
+                    # 交换方向：累计在 right，需要用 right 作为左键
+                    use_left_key = (rt, rc)
+                    # 同时把另一侧定义为右表列
+                    lc, rc = rc, lc
+                elif left_in and right_in:
+                    # 两侧都已在累计内，跳过此连接（冗余）
+                    pending_joins.pop(idx)
+                    progressed = True
+                    break
                 else:
-                    j += 1
-        else:
-            # hash join（右表建哈希）
-            h: Dict[str, List[List[str]]] = {}
-            for rr in right_rows:
-                vals = rr.get_values()
-                key = str(vals[r_idx]) if r_idx < len(vals) else ""
-                h.setdefault(key, []).append(vals)
-            for lr in left_rows:
-                lvals = lr.get_values()
-                key = str(lvals[l_idx]) if l_idx < len(lvals) else ""
-                for rv in h.get(key, []):
-                    out_rows.append(lvals + rv)
+                    # 该 join 暂时无法连接
+                    continue
+                if not other_tbl:
+                    continue
+                ensure_table_loaded(other_tbl)
+                rcols = self.table_columns.get(other_tbl, [])
+                rrows = [r.get_values() for r in self.executor.seq_scan(other_tbl)]
+                # 从累计列中找到 key 索引
+                key_name = f"{use_left_key[0]}.{use_left_key[1].upper()}"
+                try:
+                    l_idx = accumulated_cols.index(key_name)
+                except ValueError:
+                    # 裸列名回退
+                    try:
+                        l_idx = [c.split(".",1)[1] for c in accumulated_cols].index(use_left_key[1].upper())
+                    except ValueError:
+                        raise ExecutionError("JOIN 左列不存在于累计结果")
+                try:
+                    r_idx = rcols.index(rc)
+                except ValueError:
+                    raise ExecutionError("JOIN 右列不存在于右表")
+                # 构建右表哈希并连接
+                h = {}
+                for rr in rrows:
+                    key = str(rr[r_idx]) if r_idx < len(rr) else ""
+                    h.setdefault(key, []).append(rr)
+                new_rows = []
+                for lv in accumulated_rows:
+                    key = str(lv[l_idx]) if l_idx < len(lv) else ""
+                    for rv in h.get(key, []):
+                        new_rows.append(lv + rv)
+                accumulated_rows = new_rows
+                accumulated_cols = accumulated_cols + [f"{other_tbl}.{c}" for c in rcols]
+                accumulated_tables.add(other_tbl)
+                pending_joins.pop(idx)
+                progressed = True
+                break
+            if not progressed:
+                raise ExecutionError("JOIN 计划无法解析连接顺序")
+        # 若没有任何连接（理论上不会到这里），从第一张表返回
+        if not accumulated_cols:
+            base = tables[0]
+            ensure_table_loaded(base)
+            bcols = self.table_columns.get(base, [])
+            accumulated_rows = [r.get_values() for r in self.executor.seq_scan(base)]
+            accumulated_cols = [f"{base}.{c}" for c in bcols]
 
-        # WHERE 过滤（简化：暂不在JOIN后做表达式求值，留作后续增强）
-        # 投影
-        combined_cols = [f"{left_table}.{c}" for c in left_cols] + [f"{right_table}.{c}" for c in right_cols]
-        if target_columns == ["*"]:
-            projected = out_rows
-            proj_cols = combined_cols
-        else:
-            # 支持列名或限定名（table.col）
-            name_to_idx: Dict[str, int] = {}
-            for i, c in enumerate(combined_cols):
-                name_to_idx[c.upper()] = i
-                # 也允许裸列名（若唯一）
-            # 建立裸列名映射（首个出现者）
-            for i, c in enumerate(combined_cols):
-                bare = c.split(".", 1)[1].upper()
-                if bare not in name_to_idx:
-                    name_to_idx[bare] = i
-            proj_indices: List[int] = []
+        # 生成列名映射并投影/聚合
+        name_to_idx: Dict[str, int] = {}
+        for i, c in enumerate(accumulated_cols):
+            name_to_idx[c.upper()] = i
+        # 裸列别名（首个出现）
+        for i, c in enumerate(accumulated_cols):
+            bare = c.split(".", 1)[1].upper()
+            if bare not in name_to_idx:
+                name_to_idx[bare] = i
+
+        # 检查是否包含聚合
+        def _is_agg(expr: str) -> bool:
+            u = str(expr).upper()
+            return any(u.startswith(fn) or (fn in u) for fn in ("COUNT(", "SUM(", "AVG(", "MIN(", "MAX("))
+
+        has_aggs = any(_is_agg(c) for c in target_columns)
+        if has_aggs:
+            # 分组键：所有非聚合选择列
+            group_key_cols: List[int] = []
+            agg_specs: List[tuple] = []  # (func, arg_str)
             for c in target_columns:
-                key = str(c).upper()
-                if key not in name_to_idx:
-                    raise ExecutionError(f"投影列不存在: {c}")
-                proj_indices.append(name_to_idx[key])
-            projected = [[row[i] if i < len(row) else None for i in proj_indices] for row in out_rows]
+                cu = str(c)
+                u = cu.upper()
+                if _is_agg(cu):
+                    # 解析函数和参数
+                    fn = None
+                    if u.startswith("COUNT("):
+                        fn = "COUNT"
+                    elif u.startswith("SUM("):
+                        fn = "SUM"
+                    elif u.startswith("AVG("):
+                        fn = "AVG"
+                    elif u.startswith("MIN("):
+                        fn = "MIN"
+                    elif u.startswith("MAX("):
+                        fn = "MAX"
+                    arg = "*"
+                    if "(" in cu and cu.endswith(")"):
+                        arg = cu[cu.find("(") + 1:-1].strip()
+                    agg_specs.append((fn, arg))
+                else:
+                    key = str(cu).upper()
+                    if key not in name_to_idx:
+                        raise ExecutionError(f"分组列不存在: {cu}")
+                    group_key_cols.append(name_to_idx[key])
+
+            from collections import defaultdict
+            groups = {}  # key tuple -> list of rows
+            for row in accumulated_rows:
+                if group_key_cols:
+                    gkey = tuple(row[i] if i < len(row) else None for i in group_key_cols)
+                else:
+                    gkey = ("__ALL__",)
+                groups.setdefault(gkey, []).append(row)
+
+            # 计算聚合
+            out_rows = []
+            for gkey, rows in groups.items():
+                out_row = []
+                gkey_iter = iter(gkey if group_key_cols else [])
+                for c in target_columns:
+                    cu = str(c)
+                    u = cu.upper()
+                    if _is_agg(cu):
+                        # 解析
+                        fn = None
+                        if u.startswith("COUNT("):
+                            fn = "COUNT"
+                        elif u.startswith("SUM("):
+                            fn = "SUM"
+                        elif u.startswith("AVG("):
+                            fn = "AVG"
+                        elif u.startswith("MIN("):
+                            fn = "MIN"
+                        elif u.startswith("MAX("):
+                            fn = "MAX"
+                        arg = "*"
+                        if "(" in cu and cu.endswith(")"):
+                            arg = cu[cu.find("(") + 1:-1].strip()
+                        if fn == "COUNT" and arg == "*":
+                            out_row.append(len(rows))
+                        else:
+                            # 定位列
+                            k = str(arg).upper()
+                            if k not in name_to_idx:
+                                raise ExecutionError(f"聚合列不存在: {arg}")
+                            idx = name_to_idx[k]
+                            vals = []
+                            for r in rows:
+                                vals.append(r[idx] if idx < len(r) else None)
+                            # 过滤 NULL 表示
+                            nvals = [v for v in vals if v is not None and str(v).upper() != "NULL"]
+                            if fn == "SUM":
+                                out_row.append(sum(float(v) for v in nvals) if nvals else 0)
+                            elif fn == "AVG":
+                                out_row.append((sum(float(v) for v in nvals) / len(nvals)) if nvals else 0)
+                            elif fn == "MIN":
+                                out_row.append(min(nvals) if nvals else None)
+                            elif fn == "MAX":
+                                out_row.append(max(nvals) if nvals else None)
+                            else:
+                                out_row.append(None)
+                    else:
+                        # 分组键按出现顺序输出
+                        out_row.append(next(gkey_iter, None))
+                out_rows.append(out_row)
+
+            projected = out_rows
             proj_cols = [str(c) for c in target_columns]
+        else:
+            if target_columns == ["*"]:
+                projected = accumulated_rows
+                proj_cols = accumulated_cols
+            else:
+                proj_indices = []
+                for c in target_columns:
+                    key = str(c).upper()
+                    if key not in name_to_idx:
+                        raise ExecutionError(f"投影列不存在: {c}")
+                    proj_indices.append(name_to_idx[key])
+                projected = [[row[i] if i < len(row) else None for i in proj_indices] for row in accumulated_rows]
+                proj_cols = [str(c) for c in target_columns]
+
+        # 结果去重：避免由于计划重复边或底层版本导致的重复行
+        try:
+            seen_keys = set()
+            deduped = []
+            for r in projected:
+                t = tuple(r)
+                if t in seen_keys:
+                    continue
+                seen_keys.add(t)
+                deduped.append(r)
+            projected = deduped
+        except Exception:
+            pass
 
         return {
             "affected_rows": len(projected),
