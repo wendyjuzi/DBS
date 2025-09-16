@@ -454,17 +454,18 @@ class SemanticAnalyzer:
                             available_columns=self._get_available_columns()
                         )
 
-        # 检查主键约束
-        primary_keys = self.catalog.get_primary_keys(table_name)
+        # 检查主键约束（大小写不敏感）
+        primary_keys = [str(pk).upper() for pk in self.catalog.get_primary_keys(table_name)]
+        columns_upper = [str(c).upper() for c in columns]
         for pk_col in primary_keys:
-            if pk_col not in columns:
+            if pk_col not in columns_upper:
                 raise SemanticError(
                     "PrimaryKeyError", pk_col, f"INSERT 语句缺少主键列 '{pk_col}' 的值",
                     available_tables=self._get_available_tables(),
                     available_columns=self._get_available_columns()
                 )
-            # 检查主键值不为空
-            pk_index = columns.index(pk_col)
+            # 检查主键值不为空（按不区分大小写的列名取值）
+            pk_index = columns_upper.index(pk_col)
             if not values[pk_index] or str(values[pk_index]).strip() == "":
                 raise SemanticError(
                     "PrimaryKeyError", pk_col, f"主键列 '{pk_col}' 的值不能为空",
@@ -569,10 +570,95 @@ class SemanticAnalyzer:
                 if child.value == "*":
                     continue
 
+                # 先处理被包装在 COLUMN 节点中的聚合（例如值为 "AGGREGATE: AVG" 的情形），
+                # 需要在处理别名前优先识别，否则会被当作一般表达式从而误报 "AGGREGATE" 列不存在
+                try:
+                    if isinstance(child.value, str) and child.value.upper().startswith("AGGREGATE"):
+                        # 解析被文本包装的聚合函数，如：
+                        # "AGGREGATE: AVG\n  ARG: SCORE\n AS ALIAS"
+                        raw = child.value
+                        up = raw.upper()
+                        func_name = None
+                        arg_name = None
+                        # 提取函数名
+                        if "AGGREGATE:" in up:
+                            try:
+                                part = up.split("AGGREGATE:", 1)[1].strip()
+                                func_name = part.split()[0]
+                            except Exception:
+                                func_name = None
+                        # 提取参数名
+                        if "ARG:" in up:
+                            try:
+                                part = up.split("ARG:", 1)[1].strip()
+                                # 截断到换行或别名
+                                for sep in ["\n", " AS "]:
+                                    if sep in part:
+                                        part = part.split(sep, 1)[0].strip()
+                                arg_name = part
+                            except Exception:
+                                arg_name = None
+
+                        # 构造规范的聚合 AST 节点以复用通用检查逻辑
+                        try:
+                            from modules.sql_compiler.syntax.parser import ASTNode as ParserASTNode
+                        except Exception:
+                            ParserASTNode = ASTNode
+
+                        if func_name:
+                            agg_children = []
+                            if arg_name:
+                                agg_children.append(ParserASTNode("ARG", arg_name))
+                            agg_node = ParserASTNode("AGGREGATE", func_name, agg_children)
+                            self._check_aggregate_function(agg_node, tables, table_aliases)
+                            continue
+
+                        # 如果无法解析，则退化为原始处理（仍交由表达式检查）
+                except Exception:
+                    pass
+
                 # 处理带别名的列
                 if isinstance(child.value, str) and " AS " in child.value.upper():
                     # "AS" keyword is case-insensitive
                     col_part = child.value.upper().split(" AS ")[0].strip()
+                    # 再次防御性判断：别名前的部分如果是聚合包装，走聚合检查
+                    if isinstance(col_part, str) and col_part.startswith("AGGREGATE"):
+                        try:
+                            # 同样对别名前部分类似 "AGGREGATE: SUM\n  ARG: SCORE" 的文本进行解析
+                            raw = child.value if isinstance(child.value, str) else str(child.value)
+                            up = raw.upper()
+                            func_name = None
+                            arg_name = None
+                            if "AGGREGATE:" in up:
+                                try:
+                                    part = up.split("AGGREGATE:", 1)[1].strip()
+                                    func_name = part.split()[0]
+                                except Exception:
+                                    func_name = None
+                            if "ARG:" in up:
+                                try:
+                                    part = up.split("ARG:", 1)[1].strip()
+                                    for sep in ["\n", " AS "]:
+                                        if sep in part:
+                                            part = part.split(sep, 1)[0].strip()
+                                    arg_name = part
+                                except Exception:
+                                    arg_name = None
+
+                            try:
+                                from modules.sql_compiler.syntax.parser import ASTNode as ParserASTNode
+                            except Exception:
+                                ParserASTNode = ASTNode
+                            if func_name:
+                                agg_children = []
+                                if arg_name:
+                                    agg_children.append(ParserASTNode("ARG", arg_name))
+                                agg_node = ParserASTNode("AGGREGATE", func_name, agg_children)
+                                self._check_aggregate_function(agg_node, tables, table_aliases)
+                                continue
+                        except Exception:
+                            # 如果聚合重建失败，则退化为表达式检查
+                            pass
                     self._check_expression_columns(col_part, tables, table_aliases)
                     continue
 
@@ -862,26 +948,47 @@ class SemanticAnalyzer:
     def _check_aggregate_function(self, func_node, tables, table_aliases):
         """检查聚合函数的语义正确性"""
         try:
-            func_name = func_node.value
+            func_name = str(func_node.value).upper()
             arg_node = next((c for c in func_node.children if c.node_type == "ARG"), None)
             
             if not arg_node:
                 raise SemanticError("AggregateError", func_name, f"聚合函数 {func_name} 缺少参数")
             
-            arg_value = arg_node.value
+            # 提取参数文本/列名
+            def _extract_arg_text(node) -> str | None:
+                try:
+                    # 直取 value
+                    if isinstance(node.value, str) and node.value:
+                        return node.value
+                except Exception:
+                    pass
+                # 子节点里找 COLUMN/NAME/IDENT
+                try:
+                    for ch in getattr(node, 'children', []) or []:
+                        if getattr(ch, 'node_type', '').upper() in ("COLUMN", "NAME", "IDENT", "FIELD") and isinstance(ch.value, str):
+                            return ch.value
+                except Exception:
+                    pass
+                return None
             
-            # COUNT(*) 是特殊情况，无需检查列存在性
-            if func_name == "COUNT" and arg_value == "*":
+            arg_text = _extract_arg_text(arg_node)
+            
+            # COUNT(*) 特殊
+            if func_name == "COUNT" and (arg_text == "*" or str(getattr(arg_node, 'value', '')).strip() == "*"):
                 print(f"[OK] 聚合函数 {func_name}(*) 语义检查通过")
                 return
             
-            # 处理 DISTINCT 修饰符
-            if isinstance(arg_value, str) and arg_value.startswith("DISTINCT "):
-                actual_column = arg_value[9:]  # 去掉 "DISTINCT " 前缀
-            else:
-                actual_column = arg_value
+            # 未能解析出明确的列名，放行（避免把占位/内部标识误判为列名）
+            if not arg_text or not isinstance(arg_text, str):
+                print(f"[OK] 聚合函数 {func_name}(?) 非列参数，跳过列存在性检查")
+                return
             
-            # 检查列是否存在（仅对非*参数）
+            # 处理 DISTINCT 修饰符
+            actual_column = arg_text
+            if actual_column.upper().startswith("DISTINCT "):
+                actual_column = actual_column[9:]
+            
+            # 检查列是否存在
             if actual_column != "*":
                 if not self._column_exists_in_tables_with_aliases(tables, actual_column, table_aliases):
                     raise SemanticError(
@@ -889,26 +996,23 @@ class SemanticAnalyzer:
                         available_tables=self._get_available_tables(),
                         available_columns=self._get_available_columns()
                     )
-                
-                # 检查数据类型兼容性
+                # 类型检查
                 if func_name in ["SUM", "AVG"]:
-                    # SUM 和 AVG 只能用于数值列
                     for table in tables:
                         if self.catalog.has_column(table, actual_column):
                             col_type = self.catalog.get_column_type(table, actual_column)
                             if col_type not in ["INT", "DOUBLE", "FLOAT"]:
                                 raise SemanticError(
-                                    "TypeError", actual_column, 
+                                    "TypeError", actual_column,
                                     f"聚合函数 {func_name} 不能用于非数值类型列 ({col_type})",
                                     available_tables=self._get_available_tables(),
                                     available_columns=self._get_available_columns()
                                 )
                             break
             
-            print(f"[OK] 聚合函数 {func_name}({arg_value}) 语义检查通过")
+            print(f"[OK] 聚合函数 {func_name}({actual_column}) 语义检查通过")
             
         except Exception as e:
-            # 如果检查过程中出现任何错误，提供更详细的错误信息
             print(f"[DEBUG] 聚合函数检查出错: {e}")
             print(f"[DEBUG] func_node类型: {type(func_node)}")
             print(f"[DEBUG] func_node内容: {func_node}")
@@ -922,11 +1026,9 @@ class SemanticAnalyzer:
         
         # 检查表是否存在
         if not self.catalog.has_table(table_name):
-            raise SemanticError(
-                "TableError", table_name, "要删除的表不存在",
-                available_tables=self._get_available_tables(),
-                available_columns=self._get_available_columns()
-            )
+            # 降级为警告：对不存在的表执行 DROP TABLE 不阻断语义阶段
+            print(f"[WARN] DROP TABLE {table_name}: 表不存在，忽略错误（语义阶段放行）")
+            return
         
         # 检查是否有其他表引用此表作为外键
         for other_table, fks in self.catalog.foreign_keys.items():

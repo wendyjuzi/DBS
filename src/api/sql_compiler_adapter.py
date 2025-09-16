@@ -254,6 +254,68 @@ class SQLCompilerAdapter:
             if order_by:
                 result["order_by"] = order_by
             
+            # 无 GROUP BY 的简单聚合（COUNT/AVG/SUM/MIN/MAX）下推为执行器的 Aggregate 计划，
+            # 以便统一返回一行一列的聚合结果供 GUI 显示
+            try:
+                import re
+                def _parse_agg(col: str):
+                    raw = str(col).strip()
+                    u = raw.upper()
+                    # 去掉别名部分
+                    if " AS " in u:
+                        u = u.split(" AS ", 1)[0].strip()
+                    # 兼容解析器文本形式：AGGREGATE: AVG\n  ARG: SCORE
+                    if u.startswith("AGGREGATE:"):
+                        try:
+                            fn = u.split("AGGREGATE:", 1)[1].strip().split()[0]
+                        except Exception:
+                            fn = None
+                        arg = None
+                        if "ARG:" in u:
+                            part = u.split("ARG:", 1)[1].strip()
+                            for sep in ["\n", " AS "]:
+                                if sep in part:
+                                    part = part.split(sep, 1)[0].strip()
+                            arg = part
+                        if fn:
+                            if arg and "." in arg:
+                                arg = arg.split(".", 1)[1]
+                            if fn == "COUNT" and (arg == "*" or arg is None):
+                                return {"function": "COUNT", "column": "*"}
+                            if arg:
+                                return {"function": fn, "column": arg}
+                    # 正常函数形式
+                    if u == "COUNT(*)":
+                        return {"function": "COUNT", "column": "*"}
+                    m = re.match(r"^(COUNT|SUM|AVG|MIN|MAX)\(([^)]+)\)$", u)
+                    if m:
+                        fn = m.group(1)
+                        arg = m.group(2).strip()
+                        # 去掉可能的表前缀 table.column
+                        if "." in arg:
+                            arg = arg.split(".", 1)[1]
+                        return {"function": fn, "column": arg}
+                    return None
+                agg_funcs = []
+                for c in columns or []:
+                    parsed = _parse_agg(c)
+                    if parsed:
+                        agg_funcs.append(parsed)
+                # 仅当所有选择列都是聚合，且没有显式 GROUP BY 时，转为 Aggregate
+                if agg_funcs and len(agg_funcs) == len(columns or []) and not group_by:
+                    tbl = (table_name or (all_tables[0] if all_tables else ""))
+                    if tbl:
+                        return {
+                            "type": "Aggregate",
+                            "props": {"functions": agg_funcs},
+                            "children": [
+                                {"type": "SeqScan", "props": {"table": tbl}}
+                            ]
+                        }
+            except Exception:
+                # 解析失败则保持为普通 SELECT，由执行器兜底
+                pass
+            
             return result
         
         elif plan_type == "Update":
@@ -453,6 +515,14 @@ class SQLCompilerAdapter:
         # 简易事务控制语句直通处理
         upper_sql = sql.upper().rstrip(';')
         # 视图定义/删除直通处理（先于编译器）
+        if upper_sql.startswith("DROP TABLE "):
+            return self._handle_drop_table_fast(sql)
+        if upper_sql.startswith("CREATE TABLE "):
+            # 尝试快速路径创建，若失败再回退到编译器
+            try:
+                return self._handle_create_table_fast(sql)
+            except Exception:
+                pass
         if upper_sql.startswith("CREATE VIEW "):
             return self._handle_create_view(sql)
         if upper_sql.startswith("DROP VIEW "):
@@ -517,6 +587,8 @@ class SQLCompilerAdapter:
             return self._handle_show_indexes()
         if upper_sql == "SHOW COMPOSITE INDEXES":
             return self._handle_show_composite_indexes()
+
+        
         
         try:
             # 视图查询重写（仅支持单表 FROM view 的简单 SELECT）
@@ -1322,8 +1394,34 @@ class SQLCompilerAdapter:
                                 seen.add(tbl)
         except Exception:
             pass
-        # 逐表获取列
-        for t in names:
+        # 统一为大写集合，便于对比增删
+        storage_tables = {str(t).upper() for t in names}
+
+        # 先处理删除：将编译器目录中已不存在于存储的表移除，避免陈旧表导致语义冲突
+        try:
+            catalog_tables = set(getattr(self.catalog, 'tables', {}).keys())
+            removed_tables = catalog_tables - storage_tables
+            if removed_tables:
+                for rt in list(removed_tables):
+                    try:
+                        # 安全移除目录信息
+                        if rt in self.catalog.tables:
+                            self.catalog.tables.pop(rt, None)
+                        if hasattr(self.catalog, 'primary_keys') and rt in self.catalog.primary_keys:
+                            self.catalog.primary_keys.pop(rt, None)
+                        if hasattr(self.catalog, 'foreign_keys') and rt in self.catalog.foreign_keys:
+                            self.catalog.foreign_keys.pop(rt, None)
+                        if hasattr(self.catalog, 'constraints') and rt in self.catalog.constraints:
+                            self.catalog.constraints.pop(rt, None)
+                        # 清理适配器缓存
+                        self._catalog_cache.pop(rt, None)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # 逐表获取列（新增或更新）
+        for t in storage_tables:
             try:
                 tu = str(t).upper()
                 # 过滤内部/系统对象
@@ -1359,12 +1457,36 @@ class SQLCompilerAdapter:
                         col_map[c] = "DOUBLE"
                     else:
                         col_map[c] = "STRING"
+                # 扩展大小写镜像，以兼容语义检查中的大小写差异
+                col_map_bi = {}
+                for k, v in (col_map or {}).items():
+                    col_map_bi[k] = v
+                    try:
+                        col_map_bi[k.lower()] = v
+                    except Exception:
+                        pass
                 # 若未登记，则登记；已登记则跳过
                 try:
                     if not (hasattr(self.catalog, 'has_table') and self.catalog.has_table(tu)):
-                        self.catalog.create_table(tu, col_map)
+                        # 同时登记大小写两个键，解决大小写不一致导致的语义失败
+                        try:
+                            self.catalog.create_table(tu, col_map_bi)
+                        except Exception:
+                            self.catalog.tables[tu] = col_map_bi
+                        # 小写镜像
+                        try:
+                            self.catalog.tables[tu.lower()] = col_map_bi
+                        except Exception:
+                            pass
+                    else:
+                        # 已存在时补充小写镜像
+                        try:
+                            if tu.lower() not in getattr(self.catalog, 'tables', {}):
+                                self.catalog.tables[tu.lower()] = dict(self.catalog.tables.get(tu, {}))
+                        except Exception:
+                            pass
                     # 更新缓存
-                    self._catalog_cache[tu] = col_map
+                    self._catalog_cache[tu] = col_map_bi
                 except Exception:
                     pass
             except Exception:
@@ -1769,19 +1891,33 @@ class SQLCompilerAdapter:
 
     # === 视图（非物化） ===
     def _handle_create_view(self, sql: str) -> Dict[str, Any]:
-        # 语法（简化）：CREATE VIEW view_name AS <SELECT ...>;
+        # 语法（简化，容错空白/换行）：
+        #   CREATE VIEW view_name [(col1, col2, ...)] AS <SELECT ...>;
         s = sql.strip().rstrip(';')
-        up = s.upper()
         try:
-            if not up.startswith("CREATE VIEW "):
-                raise ValueError("语法: CREATE VIEW name AS <SELECT ...>;")
-            as_pos = up.find(" AS ")
-            if as_pos == -1:
-                raise ValueError("缺少 AS 关键字")
-            view_name = s[len("CREATE VIEW "):as_pos].strip()
-            select_sql = s[as_pos + 4:].strip()
+            import re
+            pattern = re.compile(
+                r"^CREATE\s+VIEW\s+"                # CREATE VIEW
+                r"([A-Za-z_][\w_]*)"                 # view name
+                r"\s*(?:\((.*?)\))?\s*"           # optional (col list)
+                r"AS\s+"                             # AS (allow any whitespace around via \s)
+                r"(SELECT[\s\S]*)$",                 # SELECT ... (greedy to end)
+                re.IGNORECASE
+            )
+            m = pattern.match(s)
+            if not m:
+                raise ValueError("语法: CREATE VIEW name [ (cols) ] AS <SELECT ...>;")
+
+            view_name = m.group(1).strip()
+            # columns = m.group(2)  # 当前实现不强制校验列清单
+            select_sql = m.group(3).strip()
+
+            # 规范化内部SELECT，去除尾分号
+            if select_sql.endswith(';'):
+                select_sql = select_sql[:-1].strip()
             if not select_sql.upper().startswith("SELECT "):
                 raise ValueError("仅支持 SELECT 视图定义")
+
             self._views[view_name] = {"sql": select_sql}
             return {"affected_rows": 0, "metadata": {"message": f"视图 '{view_name}' 已创建"}}
         except Exception as e:
@@ -1873,7 +2009,7 @@ class SQLCompilerAdapter:
                 if pu.startswith("PRIMARY KEY"):
                     try:
                         col = p[p.find('(')+1:p.rfind(')')].strip()
-                        pk_col = col
+                        pk_col = col.upper()
                     except Exception:
                         pass
                     continue
@@ -1906,13 +2042,13 @@ class SQLCompilerAdapter:
                         # 取列名为首个 token
                         try:
                             colname = p.split()[0]
-                            pk_col = colname
+                            pk_col = colname.upper()
                         except Exception:
                             pass
                     if " UNIQUE" in pu:
                         try:
                             colname = p.split()[0]
-                            uniques.append(colname)
+                            uniques.append(colname.upper())
                         except Exception:
                             pass
                     # 去掉约束关键词，保留列名与类型
@@ -2495,6 +2631,130 @@ class SQLCompilerAdapter:
             self.hybrid_storage.flush_all_dirty_pages()
         else:
             self.storage_engine.flush_all_dirty_pages()
+
+    def _handle_drop_table_fast(self, sql: str) -> Dict[str, Any]:
+        s = sql.strip().rstrip(';')
+        up = s.upper()
+        try:
+            if not up.startswith("DROP TABLE "):
+                raise ValueError("语法: DROP TABLE name;")
+            table = s[len("DROP TABLE "):].strip()
+            t = table.upper()
+            # 调用执行器/存储删除
+            try:
+                # 优先使用执行器以清理缓存
+                self.hybrid_executor._execute_drop_table({"table": t})
+            except Exception:
+                # 回退到存储引擎接口
+                try:
+                    if hasattr(self.storage_engine, 'drop_table'):
+                        self.storage_engine.drop_table(t)
+                except Exception:
+                    pass
+            # 同步移除目录与适配器缓存
+            try:
+                self.catalog.tables.pop(t, None)
+                self.catalog.tables.pop(t.lower(), None)
+                if hasattr(self.catalog, 'primary_keys'):
+                    self.catalog.primary_keys.pop(t, None)
+                if hasattr(self.catalog, 'foreign_keys'):
+                    self.catalog.foreign_keys.pop(t, None)
+                if hasattr(self.catalog, 'constraints'):
+                    self.catalog.constraints.pop(t, None)
+            except Exception:
+                pass
+            self._catalog_cache.pop(t, None)
+            return {"affected_rows": 0, "metadata": {"message": f"表 '{t}' 删除成功"}}
+        except Exception as e:
+            raise ExecutionError(f"DROP TABLE 失败: {e}")
+
+    def _handle_create_table_fast(self, sql: str) -> Dict[str, Any]:
+        # 语法：CREATE TABLE name (col TYPE, ...)
+        s = self._preprocess_create_table_constraints(sql.strip().rstrip(';'))
+        up = s.upper()
+        try:
+            if not up.startswith("CREATE TABLE "):
+                raise ValueError("语法: CREATE TABLE name (columns...);")
+            head = s[len("CREATE TABLE "):]
+            name = head.split('(')[0].strip()
+            body = s[s.find('(')+1:s.rfind(')')]
+            if not name or not body:
+                raise ValueError("缺少表名或列定义")
+            t = name.upper()
+            # 解析列: col type
+            cols_map: Dict[str, str] = {}
+            parts = [p.strip() for p in body.split(',') if p.strip()]
+            for p in parts:
+                seg = p.split()
+                if not seg:
+                    continue
+                col = seg[0].strip().strip('`"[]')
+                col_u = col.upper()
+                ty = (seg[1] if len(seg) > 1 else "STRING").upper()
+                if ty in ("VARCHAR",):
+                    ty = "STRING"
+                cols_map[col_u] = ty
+                # 增加小写镜像，便于语义检查
+                cols_map[col_u.lower()] = ty
+            # 主键列（来自预处理时解析的元数据）
+            pk_col = self._primary_key.get(t)
+            # 构造执行器计划并调用 C++ 执行器创建表，保证底层一致
+            columns_def = []
+            seen_cols = set()
+            for k in list(cols_map.keys()):
+                ku = k.upper()
+                if ku in seen_cols:
+                    continue
+                seen_cols.add(ku)
+                columns_def.append({
+                    "name": ku,
+                    "type": cols_map[k],
+                    "is_primary_key": bool(pk_col and ku == pk_col)
+                })
+            try:
+                self.hybrid_executor._execute_create_table({"type": "CREATE_TABLE", "table": t, "columns": columns_def})
+            except Exception as e:
+                raise ExecutionError(f"底层建表失败: {e}")
+            # 最少要在执行器侧登记列
+            try:
+                # 仅保留唯一列并以大写为主
+                col_keys = []
+                seen = set()
+                for k in cols_map.keys():
+                    ku = k.upper()
+                    if ku not in seen:
+                        seen.add(ku)
+                        col_keys.append(ku)
+                self.hybrid_executor.table_columns[t] = col_keys
+            except Exception:
+                pass
+            # 登记目录
+            try:
+                if not (hasattr(self.catalog, 'has_table') and self.catalog.has_table(t)):
+                    try:
+                        self.catalog.create_table(t, cols_map)
+                    except Exception:
+                        self.catalog.tables[t] = cols_map
+                # 小写镜像，缓解大小写敏感不一致
+                try:
+                    self.catalog.tables[t.lower()] = dict(cols_map)
+                except Exception:
+                    pass
+                # 主键登记
+                try:
+                    if pk_col:
+                        if hasattr(self.catalog, 'primary_keys'):
+                            self.catalog.primary_keys[t] = [pk_col]
+                            self.catalog.primary_keys[t.lower()] = [pk_col]
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # 缓存
+            self._catalog_cache[t] = cols_map
+            return {"affected_rows": 0, "metadata": {"message": f"表 '{t}' 创建成功"}}
+        except Exception as e:
+            raise ExecutionError(f"CREATE TABLE 失败: {e}")
 
 
 def create_sql_compiler_adapter(use_hybrid_storage: bool = True, 
