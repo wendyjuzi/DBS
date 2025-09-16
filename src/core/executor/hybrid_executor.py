@@ -1126,6 +1126,21 @@ class HybridExecutionEngine:
 
         # FROM → JOIN 顺序执行，支持 INNER/LEFT/RIGHT（未匹配侧补 NULL）
         base = tables[0] if tables else ""
+        # 优先尝试使用第一条 JOIN 的左表作为起始表，避免 FROM 与 ON 左表不一致
+        if not base and norm_joins:
+            first_on = (norm_joins[0] or {}).get("on", {})
+            lt0, lc0 = parse_col(first_on.get("left"))
+            cand = resolve_alias(lt0, lc0)
+            if cand:
+                base = cand
+        if norm_joins and base:
+            # 如果已有起始表，但第一条 JOIN 的左表能解析且不同，则切换为该左表
+            first_on = (norm_joins[0] or {}).get("on", {})
+            lt0, lc0 = parse_col(first_on.get("left"))
+            cand = resolve_alias(lt0, lc0)
+            if cand and cand in real_tables_set and cand != base:
+                base = cand
+        
         if not base:
             raise ExecutionError("JOIN 计划缺少起始表")
         bcols = self.table_columns.get(base, [])
@@ -1428,33 +1443,74 @@ class HybridExecutionEngine:
     def _has_aggregates(self, cols: List[str]) -> bool:
         if not cols:
             return False
-        s = ",".join([str(c).upper() for c in cols])
-        return any(k in s for k in ("COUNT(", "SUM(", "AVG(", "MIN(", "MAX(") )
+        ups = [str(c).upper() for c in cols]
+        s = ",".join(ups)
+        if any(k in s for k in ("COUNT(", "SUM(", "AVG(", "MIN(", "MAX(")):
+            return True
+        # 兼容解析器将聚合表示为文本："AGGREGATE: AVG" 等
+        return any(u.startswith("AGGREGATE:") for u in ups)
 
     def _aggregate_fallback(self, table: str, rows, cols: List[str]):
-        """在无GROUP BY时，对 COUNT/SUM/AVG/MIN/MAX 进行本地聚合，返回([[vals]], new_cols)。"""
+        """在无GROUP BY时，对 COUNT/SUM/AVG/MIN/MAX 进行本地聚合，返回([[vals]], new_cols)。
+        兼容解析器文本形式（AGGREGATE: AVG / ARG: COL）。"""
         # 准备列名映射
         table_cols = self.table_columns.get(table, [])
         name_to_idx = {str(c).upper(): i for i, c in enumerate(table_cols)}
         values = [r.get_values() for r in rows]
-        def parse_arg(expr: str) -> str:
-            # 支持 COUNT(*), FUNC(col)
-            up = expr.strip().upper()
-            if up == "COUNT(*)":
-                return "*"
-            if "(" in up and up.endswith(")"):
-                return up[up.find("(") + 1:-1].strip()
-            return up
+
+        def normalize_col_ref(ref: str) -> str:
+            s = str(ref).strip()
+            # 去掉别名
+            if " AS " in s.upper():
+                s = s[: s.upper().find(" AS ")].strip()
+            u = s.upper()
+            # 文本形式
+            if u.startswith("AGGREGATE:"):
+                fn = None; arg = None
+                try:
+                    fn = u.split("AGGREGATE:", 1)[1].strip().split()[0]
+                except Exception:
+                    fn = None
+                if "ARG:" in u:
+                    part = u.split("ARG:", 1)[1].strip()
+                    for sep in ["\n", " AS "]:
+                        if sep in part:
+                            part = part.split(sep, 1)[0].strip()
+                    arg = part
+                if fn:
+                    if arg:
+                        # 去前缀 table.
+                        if "." in arg:
+                            arg = arg.split(".", 1)[1]
+                        return f"{fn}({arg})"
+                    return f"{fn}(*)"
+            return s
+
+        def parse_func(expr: str) -> (str, str):
+            raw = normalize_col_ref(expr)
+            u = raw.upper()
+            if u == "COUNT(*)":
+                return "COUNT", "*"
+            if "(" in u and u.endswith(")"):
+                fn = u[: u.find("(")].strip()
+                arg = u[u.find("(") + 1:-1].strip()
+                # 去表前缀
+                if "." in arg:
+                    arg = arg.split(".", 1)[1]
+                return fn, arg
+            # 兜底：将非函数视为 COUNT(*)
+            return "COUNT", "*"
+
         out_vals: List[str] = []
         out_cols: List[str] = []
         for c in cols:
-            cu = str(c).upper()
-            if cu.startswith("COUNT("):
+            fn, arg = parse_func(c)
+            fnu = str(fn).upper()
+            if fnu == "COUNT" and arg == "*":
                 out_vals.append(len(values))
-                out_cols.append(c)
-            elif cu.startswith("SUM("):
-                arg = parse_arg(c)
-                idx = name_to_idx.get(arg, -1)
+                out_cols.append("COUNT(*)")
+            elif fnu == "SUM":
+                idx = name_to_idx.get(arg.upper(), -1)
                 s = 0.0
                 for v in values:
                     if 0 <= idx < len(v):
@@ -1463,10 +1519,9 @@ class HybridExecutionEngine:
                         except Exception:
                             pass
                 out_vals.append(int(s) if s.is_integer() else s)
-                out_cols.append(c)
-            elif cu.startswith("AVG("):
-                arg = parse_arg(c)
-                idx = name_to_idx.get(arg, -1)
+                out_cols.append(f"SUM({arg})")
+            elif fnu == "AVG":
+                idx = name_to_idx.get(arg.upper(), -1)
                 s = 0.0; n = 0
                 for v in values:
                     if 0 <= idx < len(v):
@@ -1475,30 +1530,29 @@ class HybridExecutionEngine:
                         except Exception:
                             pass
                 out_vals.append((s / n) if n > 0 else 0)
-                out_cols.append(c)
-            elif cu.startswith("MIN("):
-                arg = parse_arg(c)
-                idx = name_to_idx.get(arg, -1)
+                out_cols.append(f"AVG({arg})")
+            elif fnu == "MIN":
+                idx = name_to_idx.get(arg.upper(), -1)
                 cur = None
                 for v in values:
                     if 0 <= idx < len(v):
                         val = v[idx]
                         cur = val if cur is None or val < cur else cur
                 out_vals.append(cur)
-                out_cols.append(c)
-            elif cu.startswith("MAX("):
-                arg = parse_arg(c)
-                idx = name_to_idx.get(arg, -1)
+                out_cols.append(f"MIN({arg})")
+            elif fnu == "MAX":
+                idx = name_to_idx.get(arg.upper(), -1)
                 cur = None
                 for v in values:
                     if 0 <= idx < len(v):
                         val = v[idx]
                         cur = val if cur is None or val > cur else cur
                 out_vals.append(cur)
-                out_cols.append(c)
+                out_cols.append(f"MAX({arg})")
             else:
-                # 非聚合列在无GROUP BY语义下不可直接返回，这里忽略
-                continue
+                # 未知函数：按 COUNT(*) 处理
+                out_vals.append(len(values))
+                out_cols.append("COUNT(*)")
         return [out_vals], out_cols
 
     def _execute_group_by(self, plan: Dict[str, Any]) -> Dict[str, Any]:
