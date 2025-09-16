@@ -139,7 +139,6 @@ class DatabaseGUI:
         # 配置文本标签用于错误高亮
         self.sql_text.tag_configure("error", background="#ffcccc", foreground="#cc0000")
         self.sql_text.tag_configure("warning", background="#fff3cd", foreground="#856404")
-        self.sql_text.tag_configure("suggestion", background="#d1ecf1", foreground="#0c5460")
         
         # 错误提示和修复区域
         error_frame = ttk.Frame(input_frame)
@@ -1018,16 +1017,14 @@ SELECT id, name, score FROM students WHERE age > 18;"""
             self.result_text.insert(tk.END, data_str + "\n")
 
     def update_monitors(self):
-        """更新监控信息"""
+        """更新监控信息 - 紧急修复版本"""
         try:
-            # 更新编译器信息
+            # 紧急修复：暂时只更新基本信息，避免触发SQL查询
             self.update_compiler_info()
-
-            # 更新存储信息
-            self.update_storage_info()
-
-            # 更新执行器信息
-            self.update_executor_info()
+            
+            # 暂时跳过存储和执行器信息更新，这些会触发表扫描和SQL查询
+            # self.update_storage_info()  # 包含 get_catalog_info 和 SQL 查询
+            # self.update_executor_info()  # 可能包含状态查询
 
         except Exception as e:
             self.log(f"更新监控信息失败: {e}")
@@ -1548,20 +1545,18 @@ CreateTableStatement
 
     def on_key_release(self, event):
         """按键释放事件处理"""
-        # 实时语法检查
-        self.check_syntax_realtime()
-        
-        # 智能纠错检查（延迟执行，避免频繁触发）
-        self.on_sql_text_change(event)
-        
-        # 获取当前光标位置的单词
-        current_word = self.get_current_word()
-        
-        # 如果单词长度大于1且不是特殊字符，显示补全
-        if len(current_word) > 1 and current_word.isalnum():
-            self.show_autocomplete_suggestions(current_word)
-        else:
-            self.hide_autocomplete()
+        try:
+            # 重新启用智能纠错功能
+            self.on_sql_text_change(event)
+            
+            # 保留自动补全功能
+            current_word = self.get_current_word()
+            if len(current_word) > 2 and current_word.isalnum():
+                self.show_autocomplete_suggestions(current_word)
+            else:
+                self.hide_autocomplete()
+        except Exception:
+            pass
 
     def check_syntax_realtime(self):
         """实时语法检查"""
@@ -2310,10 +2305,10 @@ C++加速: {stats.get('cpp_enabled', False)}
                 self.storage_status.config(text=f"存储: {status}", foreground=color)
             elif component == "executor":
                 self.executor_status.config(text=f"执行器: {status}", foreground=color)
-        # 同步一次目录，确保能识别历史表
+        # 紧急修复：暂时禁用目录同步，避免GUI卡顿
+        # 目录同步包含递归文件扫描，会导致界面无响应
         try:
-            if BACKEND_AVAILABLE and self.adapter and hasattr(self.adapter, 'sync_catalog'):
-                self.adapter.sync_catalog()
+            pass  # 暂时跳过同步，待性能优化后再启用
         except Exception:
             pass
         self.update_monitors()
@@ -2577,10 +2572,10 @@ DELETE FROM students WHERE id = 3;
     def on_sql_text_change(self, event=None):
         """SQL文本变化时的智能检查"""
         try:
-            # 延迟检查，避免频繁触发
+            # 重新启用智能纠错，现在检测功能更完善了
             if hasattr(self, '_check_timer'):
                 self.root.after_cancel(self._check_timer)
-            self._check_timer = self.root.after(500, self.check_sql_errors)
+            self._check_timer = self.root.after(800, self.check_sql_errors)  # 稍微延长延迟时间
         except Exception:
             pass
     
@@ -2589,7 +2584,6 @@ DELETE FROM students WHERE id = 3;
         try:
             self.sql_text.tag_remove("error", "1.0", tk.END)
             self.sql_text.tag_remove("warning", "1.0", tk.END)
-            self.sql_text.tag_remove("suggestion", "1.0", tk.END)
         except Exception:
             pass
     
@@ -2613,7 +2607,6 @@ DELETE FROM students WHERE id = 3;
             
             errors = []
             warnings = []
-            suggestions = []
             
             # 检查拼写错误
             spell_errors, spell_fixes = self.check_spelling_errors(sql)
@@ -2623,28 +2616,22 @@ DELETE FROM students WHERE id = 3;
             syntax_warnings = self.check_syntax_structure(sql)
             warnings.extend(syntax_warnings)
             
-            # 提供智能建议
-            smart_suggestions = self.get_smart_suggestions(sql)
-            suggestions.extend(smart_suggestions)
-            
             # 存储修复建议
             self.current_fixes = spell_fixes
             
             # 高亮错误
             self.highlight_errors(sql, spell_errors)
             
-            # 显示错误信息和控制修复按钮
+            # 显示错误信息和控制修复按钮（只显示错误和警告）
             if errors:
                 self.error_label.config(text=f"❌ {'; '.join(errors)}")
                 self.fix_button.config(state="normal" if self.current_fixes else "disabled")
             elif warnings:
                 self.error_label.config(text=f"⚠️  {'; '.join(warnings)}")
                 self.fix_button.config(state="disabled")
-            elif suggestions:
-                self.error_label.config(text=f"💡 {'; '.join(suggestions[:1])}")  # 只显示第一个建议
-                self.fix_button.config(state="disabled")
             else:
-                self.error_label.config(text="✅ 语法检查通过")
+                # 无错误和警告时，清空显示
+                self.error_label.config(text="")
                 self.fix_button.config(state="disabled")
                 
         except Exception as e:
@@ -2656,60 +2643,154 @@ DELETE FROM students WHERE id = 3;
         errors = []
         fixes = []
         
-        # 常见的拼写错误映射
+        # 扩展的拼写错误映射 - 覆盖更多常见错误
         spell_corrections = {
-            'SELCT': 'SELECT',
-            'SELET': 'SELECT',
-            'SLEECT': 'SELECT',
-            'SLECT': 'SELECT',
-            'CREAT': 'CREATE',
-            'CRETE': 'CREATE',
-            'CRAETE': 'CREATE',
-            'INSRT': 'INSERT',
-            'INSER': 'INSERT',
-            'ISERT': 'INSERT',
-            'UPDAT': 'UPDATE',
-            'UPDAE': 'UPDATE',
-            'DELET': 'DELETE',
-            'DLEET': 'DELETE',
-            'WHER': 'WHERE',
-            'WHRE': 'WHERE',
-            'WEHRE': 'WHERE',
-            'FORM': 'FROM',
-            'FRM': 'FROM',
-            'GRUP': 'GROUP',
-            'GRPUP': 'GROUP',
-            'ORDRE': 'ORDER',
-            'ORDRER': 'ORDER',
-            'JION': 'JOIN',
-            'INENR': 'INNER',
-            'INNRE': 'INNER',
-            'LAFT': 'LEFT',
-            'RIGH': 'RIGHT',
-            'HAVIG': 'HAVING',
-            'HAVNG': 'HAVING',
-            'LIMT': 'LIMIT',
-            'LIMTI': 'LIMIT'
+            # SELECT 变体
+            'SELCT': 'SELECT', 'SELET': 'SELECT', 'SLEECT': 'SELECT', 'SLECT': 'SELECT',
+            'SELECCT': 'SELECT', 'SEELCT': 'SELECT', 'SELEECT': 'SELECT', 'SELEET': 'SELECT',
+            
+            # CREATE 变体  
+            'CREAT': 'CREATE', 'CRETE': 'CREATE', 'CRAETE': 'CREATE', 'CREEAT': 'CREATE',
+            'CRAEATE': 'CREATE', 'CRREATE': 'CREATE', 'CREATEE': 'CREATE',
+            
+            # INSERT 变体
+            'INSRT': 'INSERT', 'INSER': 'INSERT', 'ISERT': 'INSERT', 'INSERRT': 'INSERT',
+            'INSERET': 'INSERT', 'INSERTT': 'INSERT', 'INSETT': 'INSERT',
+            
+            # UPDATE 变体
+            'UPDAT': 'UPDATE', 'UPDAE': 'UPDATE', 'UPDATEE': 'UPDATE', 'UUPDATE': 'UPDATE',
+            'UPDATTE': 'UPDATE', 'UPDAET': 'UPDATE',
+            
+            # DELETE 变体
+            'DELET': 'DELETE', 'DLEET': 'DELETE', 'DELEET': 'DELETE', 'DEELET': 'DELETE',
+            'DELETEE': 'DELETE', 'DEELETE': 'DELETE',
+            
+            # WHERE 变体
+            'WHER': 'WHERE', 'WHRE': 'WHERE', 'WEHRE': 'WHERE', 'WHEERE': 'WHERE',
+            'WHHERE': 'WHERE', 'WHEREE': 'WHERE',
+            
+            # FROM 变体
+            'FORM': 'FROM', 'FRM': 'FROM', 'FROOM': 'FROM', 'FROMM': 'FROM',
+            
+            # GROUP 变体
+            'GRUP': 'GROUP', 'GRPUP': 'GROUP', 'GRROUP': 'GROUP', 'GROUPP': 'GROUP',
+            'GROPU': 'GROUP', 'GROUUP': 'GROUP',
+            
+            # ORDER 变体
+            'ORDRE': 'ORDER', 'ORDRER': 'ORDER', 'ORDERR': 'ORDER', 'ORRDER': 'ORDER',
+            'ORDDER': 'ORDER',
+            
+            # JOIN 变体
+            'JION': 'JOIN', 'JOINN': 'JOIN', 'JOOIN': 'JOIN', 'JJOIN': 'JOIN',
+            
+            # INNER 变体
+            'INENR': 'INNER', 'INNRE': 'INNER', 'INNNER': 'INNER', 'IINNER': 'INNER',
+            'INNERR': 'INNER',
+            
+            # LEFT/RIGHT 变体
+            'LAFT': 'LEFT', 'LEFFT': 'LEFT', 'LEFTT': 'LEFT', 'LEEFT': 'LEFT',
+            'RIGH': 'RIGHT', 'RIGHTT': 'RIGHT', 'RIIGHT': 'RIGHT', 'RIGTH': 'RIGHT',
+            
+            # HAVING 变体
+            'HAVIG': 'HAVING', 'HAVNG': 'HAVING', 'HAVVING': 'HAVING', 'HAAVING': 'HAVING',
+            'HAVIING': 'HAVING',
+            
+            # LIMIT 变体
+            'LIMT': 'LIMIT', 'LIMTI': 'LIMIT', 'LIMITT': 'LIMIT', 'LIIMIT': 'LIMIT',
+            
+            # TABLE 变体
+            'TABL': 'TABLE', 'TABEL': 'TABLE', 'TABLEE': 'TABLE', 'TTABLE': 'TABLE',
+            'TABBLE': 'TABLE',
+            
+            # VALUES 变体
+            'VALE': 'VALUES', 'VALES': 'VALUES', 'VALEUS': 'VALUES', 'VALUESS': 'VALUES',
+            'VALUUES': 'VALUES', 'VVALUES': 'VALUES',
+            
+            # INDEX 变体
+            'INDE': 'INDEX', 'INDX': 'INDEX', 'INDEEX': 'INDEX', 'INNDEX': 'INDEX',
+            'INDEXX': 'INDEX',
+            
+            # DISTINCT 变体
+            'DISTINC': 'DISTINCT', 'DISTINT': 'DISTINCT', 'DISINCT': 'DISTINCT',
+            'DISTINCTT': 'DISTINCT', 'DDISTINCT': 'DISTINCT',
+            
+            # COUNT 变体
+            'CONT': 'COUNT', 'COUN': 'COUNT', 'COUTN': 'COUNT', 'COUNTT': 'COUNT',
+            'COOUNT': 'COUNT',
+            
+            # 其他常用关键字变体
+            'ALTR': 'ALTER', 'ALTEER': 'ALTER', 'ALTERR': 'ALTER',
+            'DROPP': 'DROP', 'DORP': 'DROP', 'DRROP': 'DROP',
+            'PRIMART': 'PRIMARY', 'PRIMERY': 'PRIMARY', 'PRMARY': 'PRIMARY',
+            'FORIEGN': 'FOREIGN', 'FOREGIN': 'FOREIGN', 'FOREIN': 'FOREIGN',
+            'UNIQU': 'UNIQUE', 'UNIQEU': 'UNIQUE', 'UNIIQUE': 'UNIQUE',
+            'NOTT': 'NOT', 'NNOT': 'NOT',
+            'NULK': 'NULL', 'NULLL': 'NULL', 'NNULL': 'NULL',
+            'ANDD': 'AND', 'ANND': 'AND', 'ANN': 'AND',
+            'ORR': 'OR', 'OOR': 'OR',
+            'BETWEN': 'BETWEEN', 'BEWEEN': 'BETWEEN', 'BEETWEEN': 'BETWEEN',
+            'LIKEE': 'LIKE', 'LLIKE': 'LIKE', 'LIIKE': 'LIKE',
+            'EXISTSS': 'EXISTS', 'EXSITS': 'EXISTS', 'EXSIST': 'EXISTS',
+            'UNIO': 'UNION', 'UNIOIN': 'UNION', 'UNIONN': 'UNION',
+            'CASEE': 'CASE', 'CCASE': 'CASE', 'CAASE': 'CASE',
+            'WHENN': 'WHEN', 'WHHEN': 'WHEN', 'WEHN': 'WHEN',
+            'THENN': 'THEN', 'THHEN': 'THEN', 'TEHN': 'THEN',
+            'ELSSE': 'ELSE', 'ELSE': 'ELSE', 'EELSE': 'ELSE',
+            'ENDD': 'END', 'ENND': 'END', 'EEND': 'END'
         }
         
-        # 检查每个单词
-        words = sql.split()  # 保持原始大小写用于替换
-        upper_words = sql.upper().split()
+        # 更智能的词法错误检测
+        import re
         
-        for i, (word, upper_word) in enumerate(zip(words, upper_words)):
-            # 移除标点符号进行检查
-            clean_upper_word = upper_word.strip('();,')
-            if clean_upper_word in spell_corrections:
-                errors.append(f"'{clean_upper_word}' 应为 '{spell_corrections[clean_upper_word]}'")
-                # 保存修复建议：(原始单词, 修正单词, 位置)
-                correct_word = spell_corrections[clean_upper_word]
-                # 保持原始的标点符号
-                punctuation = ''.join(c for c in word if c in '();,')
-                if word.lower() == word:  # 如果原来是小写，保持小写
+        # 1. 基本拼写错误检查
+        words = re.findall(r'\b\w+\b', sql)  # 提取单词，忽略标点和空格
+        
+        for i, word in enumerate(words):
+            upper_word = word.upper()
+            
+            # 直接拼写错误检查
+            if upper_word in spell_corrections:
+                errors.append(f"'{word}' 应为 '{spell_corrections[upper_word]}'")
+                correct_word = spell_corrections[upper_word]
+                # 保持原始大小写风格
+                if word.lower() == word:
                     correct_word = correct_word.lower()
-                elif word.title() == word:  # 如果原来是首字母大写
+                elif word.title() == word:
                     correct_word = correct_word.title()
-                fixes.append((clean_upper_word, correct_word + punctuation, i))
+                fixes.append((word, correct_word, i))
+        
+        # 2. 检查常见的词法模式错误
+        # 检查引号不匹配
+        single_quotes = sql.count("'")
+        double_quotes = sql.count('"')
+        if single_quotes % 2 != 0:
+            errors.append("单引号不匹配，可能缺少闭合引号")
+        if double_quotes % 2 != 0:
+            errors.append("双引号不匹配，可能缺少闭合引号")
+        
+        # 检查括号不匹配
+        open_parens = sql.count('(')
+        close_parens = sql.count(')')
+        if open_parens != close_parens:
+            if open_parens > close_parens:
+                errors.append(f"缺少 {open_parens - close_parens} 个右括号 ')'")
+            else:
+                errors.append(f"多余 {close_parens - open_parens} 个右括号 ')'")
+        
+        # 3. 检查数字和标识符格式
+        # 检查无效的数字格式
+        number_pattern = r'\b\d+\.\d*\.\d+\b'  # 多个小数点
+        invalid_numbers = re.findall(number_pattern, sql)
+        for num in invalid_numbers:
+            errors.append(f"无效的数字格式: '{num}'")
+        
+        # 检查以数字开头的标识符（通常无效）
+        invalid_identifiers = re.findall(r'\b\d+[a-zA-Z_]\w*\b', sql)
+        for ident in invalid_identifiers:
+            # 排除明显的字符串或注释
+            if not any(quote in sql[sql.find(ident)-10:sql.find(ident)+len(ident)+10] 
+                      for quote in ["'", '"', '--', '/*']):
+                errors.append(f"标识符不能以数字开头: '{ident}'")
         
         return errors, fixes
     
@@ -2745,27 +2826,6 @@ DELETE FROM students WHERE id = 3;
         
         return warnings
     
-    def get_smart_suggestions(self, sql: str) -> list:
-        """获取智能建议"""
-        suggestions = []
-        upper_sql = sql.upper().strip()
-        
-        # 基于上下文的建议
-        if 'WHERE' in upper_sql and 'AND' not in upper_sql and 'OR' not in upper_sql:
-            if upper_sql.count('=') > 1 or any(op in upper_sql for op in ['>', '<', '>=', '<=']):
-                suggestions.append("考虑使用AND或OR连接多个条件")
-        
-        if upper_sql.startswith('SELECT') and 'ORDER BY' not in upper_sql and 'LIMIT' in upper_sql:
-            suggestions.append("使用LIMIT时建议添加ORDER BY子句")
-        
-        if 'JOIN' in upper_sql and 'ON' not in upper_sql:
-            suggestions.append("JOIN通常需要ON子句指定连接条件")
-        
-        # 性能建议
-        if upper_sql.startswith('SELECT *'):
-            suggestions.append("考虑明确指定需要的列名而不是使用*")
-        
-        return suggestions
     
     def highlight_errors(self, sql: str, errors: list):
         """在文本框中高亮显示错误"""
