@@ -134,10 +134,31 @@ class DatabaseGUI:
         # SQL输入文本框
         self.sql_text = scrolledtext.ScrolledText(input_frame, height=8,
                                                   font=("Consolas", 10))
-        self.sql_text.pack(fill=tk.BOTH, expand=True, pady=(5, 10))
+        self.sql_text.pack(fill=tk.BOTH, expand=True, pady=(5, 5))
         
-        # 绑定自动补全事件
+        # 配置文本标签用于错误高亮
+        self.sql_text.tag_configure("error", background="#ffcccc", foreground="#cc0000")
+        self.sql_text.tag_configure("warning", background="#fff3cd", foreground="#856404")
+        self.sql_text.tag_configure("suggestion", background="#d1ecf1", foreground="#0c5460")
+        
+        # 错误提示和修复区域
+        error_frame = ttk.Frame(input_frame)
+        error_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.error_label = ttk.Label(error_frame, text="", foreground="red", font=("Arial", 9))
+        self.error_label.pack(side=tk.LEFT)
+        
+        self.fix_button = ttk.Button(error_frame, text="🔧 快速修复", 
+                                    command=self.apply_quick_fix, state="disabled")
+        self.fix_button.pack(side=tk.RIGHT)
+        
+        # 存储当前的修复建议
+        self.current_fixes = []
+        
+        # 绑定事件
         self.setup_autocomplete()
+        # 不重复绑定KeyRelease事件，已在setup_autocomplete中绑定
+        self.sql_text.bind('<Button-1>', self.on_text_click)
 
         # 预设SQL示例
         sample_sql = """-- SQL示例 (点击执行按钮运行)
@@ -1526,6 +1547,9 @@ CreateTableStatement
         # 实时语法检查
         self.check_syntax_realtime()
         
+        # 智能纠错检查（延迟执行，避免频繁触发）
+        self.on_sql_text_change(event)
+        
         # 获取当前光标位置的单词
         current_word = self.get_current_word()
         
@@ -1817,7 +1841,7 @@ CreateTableStatement
         self.autocomplete_listbox.bind('<Double-Button-1>', self.insert_suggestion)
         self.autocomplete_listbox.bind('<Return>', self.insert_suggestion)
         self.sql_text.bind('<Escape>', lambda e: self.hide_autocomplete())
-        self.sql_text.bind('<Button-1>', lambda e: self.hide_autocomplete())
+        # 不重复绑定Button-1事件，已在主初始化中绑定到on_text_click
 
     def position_autocomplete_window(self):
         """定位自动补全窗口"""
@@ -2543,6 +2567,267 @@ DELETE FROM students WHERE id = 3;
         # 直接转发给适配器，适配器内部处理导入
         if self.adapter:
             self.adapter.execute(sql)
+
+    # ===== 智能纠错功能 =====
+    
+    def on_sql_text_change(self, event=None):
+        """SQL文本变化时的智能检查"""
+        try:
+            # 延迟检查，避免频繁触发
+            if hasattr(self, '_check_timer'):
+                self.root.after_cancel(self._check_timer)
+            self._check_timer = self.root.after(500, self.check_sql_errors)
+        except Exception:
+            pass
+    
+    def clear_error_highlights(self, event=None):
+        """清除错误高亮"""
+        try:
+            self.sql_text.tag_remove("error", "1.0", tk.END)
+            self.sql_text.tag_remove("warning", "1.0", tk.END)
+            self.sql_text.tag_remove("suggestion", "1.0", tk.END)
+        except Exception:
+            pass
+    
+    def on_text_click(self, event=None):
+        """文本点击事件处理"""
+        # 清除错误高亮
+        self.clear_error_highlights(event)
+        # 隐藏自动补全窗口
+        self.hide_autocomplete()
+    
+    def check_sql_errors(self):
+        """检查SQL语句中的错误"""
+        try:
+            sql = self.sql_text.get("1.0", tk.END).strip()
+            if not sql or sql.startswith("--"):
+                self.error_label.config(text="")
+                return
+                
+            # 清除之前的高亮
+            self.clear_error_highlights()
+            
+            errors = []
+            warnings = []
+            suggestions = []
+            
+            # 检查拼写错误
+            spell_errors, spell_fixes = self.check_spelling_errors(sql)
+            errors.extend(spell_errors)
+            
+            # 检查语法结构
+            syntax_warnings = self.check_syntax_structure(sql)
+            warnings.extend(syntax_warnings)
+            
+            # 提供智能建议
+            smart_suggestions = self.get_smart_suggestions(sql)
+            suggestions.extend(smart_suggestions)
+            
+            # 存储修复建议
+            self.current_fixes = spell_fixes
+            
+            # 高亮错误
+            self.highlight_errors(sql, spell_errors)
+            
+            # 显示错误信息和控制修复按钮
+            if errors:
+                self.error_label.config(text=f"❌ {'; '.join(errors)}")
+                self.fix_button.config(state="normal" if self.current_fixes else "disabled")
+            elif warnings:
+                self.error_label.config(text=f"⚠️  {'; '.join(warnings)}")
+                self.fix_button.config(state="disabled")
+            elif suggestions:
+                self.error_label.config(text=f"💡 {'; '.join(suggestions[:1])}")  # 只显示第一个建议
+                self.fix_button.config(state="disabled")
+            else:
+                self.error_label.config(text="✅ 语法检查通过")
+                self.fix_button.config(state="disabled")
+                
+        except Exception as e:
+            # 静默处理错误，避免干扰用户输入
+            pass
+    
+    def check_spelling_errors(self, sql: str) -> tuple:
+        """检查SQL关键字拼写错误，返回错误列表和修复建议"""
+        errors = []
+        fixes = []
+        
+        # 常见的拼写错误映射
+        spell_corrections = {
+            'SELCT': 'SELECT',
+            'SELET': 'SELECT',
+            'SLEECT': 'SELECT',
+            'SLECT': 'SELECT',
+            'CREAT': 'CREATE',
+            'CRETE': 'CREATE',
+            'CRAETE': 'CREATE',
+            'INSRT': 'INSERT',
+            'INSER': 'INSERT',
+            'ISERT': 'INSERT',
+            'UPDAT': 'UPDATE',
+            'UPDAE': 'UPDATE',
+            'DELET': 'DELETE',
+            'DLEET': 'DELETE',
+            'WHER': 'WHERE',
+            'WHRE': 'WHERE',
+            'WEHRE': 'WHERE',
+            'FORM': 'FROM',
+            'FRM': 'FROM',
+            'GRUP': 'GROUP',
+            'GRPUP': 'GROUP',
+            'ORDRE': 'ORDER',
+            'ORDRER': 'ORDER',
+            'JION': 'JOIN',
+            'INENR': 'INNER',
+            'INNRE': 'INNER',
+            'LAFT': 'LEFT',
+            'RIGH': 'RIGHT',
+            'HAVIG': 'HAVING',
+            'HAVNG': 'HAVING',
+            'LIMT': 'LIMIT',
+            'LIMTI': 'LIMIT'
+        }
+        
+        # 检查每个单词
+        words = sql.split()  # 保持原始大小写用于替换
+        upper_words = sql.upper().split()
+        
+        for i, (word, upper_word) in enumerate(zip(words, upper_words)):
+            # 移除标点符号进行检查
+            clean_upper_word = upper_word.strip('();,')
+            if clean_upper_word in spell_corrections:
+                errors.append(f"'{clean_upper_word}' 应为 '{spell_corrections[clean_upper_word]}'")
+                # 保存修复建议：(原始单词, 修正单词, 位置)
+                correct_word = spell_corrections[clean_upper_word]
+                # 保持原始的标点符号
+                punctuation = ''.join(c for c in word if c in '();,')
+                if word.lower() == word:  # 如果原来是小写，保持小写
+                    correct_word = correct_word.lower()
+                elif word.title() == word:  # 如果原来是首字母大写
+                    correct_word = correct_word.title()
+                fixes.append((clean_upper_word, correct_word + punctuation, i))
+        
+        return errors, fixes
+    
+    def check_syntax_structure(self, sql: str) -> list:
+        """检查语法结构问题"""
+        warnings = []
+        upper_sql = sql.upper().strip()
+        
+        # 检查常见的语法结构问题
+        if upper_sql.startswith('SELECT') and 'FROM' not in upper_sql:
+            warnings.append("SELECT语句通常需要FROM子句")
+        
+        if upper_sql.startswith('INSERT') and 'VALUES' not in upper_sql and 'SELECT' not in upper_sql:
+            warnings.append("INSERT语句需要VALUES子句或SELECT子句")
+        
+        if upper_sql.startswith('UPDATE') and 'SET' not in upper_sql:
+            warnings.append("UPDATE语句需要SET子句")
+        
+        if upper_sql.startswith('CREATE TABLE') and '(' not in upper_sql:
+            warnings.append("CREATE TABLE语句需要列定义")
+        
+        # 检查括号匹配
+        if sql.count('(') != sql.count(')'):
+            warnings.append("括号不匹配")
+        
+        # 检查引号匹配
+        single_quotes = sql.count("'")
+        double_quotes = sql.count('"')
+        if single_quotes % 2 != 0:
+            warnings.append("单引号不匹配")
+        if double_quotes % 2 != 0:
+            warnings.append("双引号不匹配")
+        
+        return warnings
+    
+    def get_smart_suggestions(self, sql: str) -> list:
+        """获取智能建议"""
+        suggestions = []
+        upper_sql = sql.upper().strip()
+        
+        # 基于上下文的建议
+        if 'WHERE' in upper_sql and 'AND' not in upper_sql and 'OR' not in upper_sql:
+            if upper_sql.count('=') > 1 or any(op in upper_sql for op in ['>', '<', '>=', '<=']):
+                suggestions.append("考虑使用AND或OR连接多个条件")
+        
+        if upper_sql.startswith('SELECT') and 'ORDER BY' not in upper_sql and 'LIMIT' in upper_sql:
+            suggestions.append("使用LIMIT时建议添加ORDER BY子句")
+        
+        if 'JOIN' in upper_sql and 'ON' not in upper_sql:
+            suggestions.append("JOIN通常需要ON子句指定连接条件")
+        
+        # 性能建议
+        if upper_sql.startswith('SELECT *'):
+            suggestions.append("考虑明确指定需要的列名而不是使用*")
+        
+        return suggestions
+    
+    def highlight_errors(self, sql: str, errors: list):
+        """在文本框中高亮显示错误"""
+        try:
+            # 这里可以根据具体的错误位置进行高亮
+            # 简化版本：高亮所有检测到的错误单词
+            for error in errors:
+                if "'" in error:
+                    # 提取错误单词
+                    parts = error.split("'")
+                    if len(parts) >= 2:
+                        wrong_word = parts[1]
+                        # 在文本中查找并高亮
+                        start_pos = "1.0"
+                        while True:
+                            pos = self.sql_text.search(wrong_word, start_pos, tk.END, nocase=True)
+                            if not pos:
+                                break
+                            end_pos = f"{pos}+{len(wrong_word)}c"
+                            self.sql_text.tag_add("error", pos, end_pos)
+                            start_pos = end_pos
+        except Exception:
+            pass
+
+    def apply_quick_fix(self):
+        """应用快速修复"""
+        try:
+            if not self.current_fixes:
+                return
+            
+            # 获取当前SQL文本
+            current_sql = self.sql_text.get("1.0", tk.END).strip()
+            words = current_sql.split()
+            
+            # 应用所有修复
+            for wrong_word, correct_word, position in self.current_fixes:
+                if position < len(words):
+                    # 替换对应位置的单词
+                    old_word = words[position]
+                    # 保持大小写风格
+                    if old_word.isupper():
+                        words[position] = correct_word.upper()
+                    elif old_word.islower():
+                        words[position] = correct_word.lower()
+                    else:
+                        words[position] = correct_word
+            
+            # 重新构建SQL
+            fixed_sql = ' '.join(words)
+            
+            # 更新文本框
+            self.sql_text.delete("1.0", tk.END)
+            self.sql_text.insert("1.0", fixed_sql)
+            
+            # 清除修复建议
+            self.current_fixes = []
+            self.fix_button.config(state="disabled")
+            
+            # 显示成功消息
+            self.error_label.config(text="✅ 已应用快速修复")
+            
+            # 2秒后重新检查
+            self.root.after(2000, self.check_sql_errors)
+            
+        except Exception as e:
+            messagebox.showerror("修复失败", f"应用快速修复时出错: {e}")
 
     def _suggest_fixes(self, sql: str, error: str) -> str:
         tips = []
