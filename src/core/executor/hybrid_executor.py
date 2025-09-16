@@ -306,6 +306,8 @@ class HybridExecutionEngine:
             print(f"[EXEC] 过滤后 {len(filtered_rows)} 行")
         # MVCC：在投影前应用版本链可见性替换（调用C++可见性查询）
         filtered_rows = self._apply_mvcc_to_rows(table_name, filtered_rows)
+        # 去重：若存在主键，按主键保留最新版本（顺序扫描/插入顺序下，后出现的为新）
+        filtered_rows = self._deduplicate_by_pk(table_name, filtered_rows)
         # 聚合回退（无GROUP BY场景）：当目标列包含聚合表达式时，在Python侧聚合
         if self._has_aggregates(target_columns):
             projected_data, target_columns = self._aggregate_fallback(table_name, filtered_rows, target_columns)
@@ -627,9 +629,10 @@ class HybridExecutionEngine:
 
         if set_pairs:
             if pk_col and pk_col in col_names:
-                # 确认有主键列：总是采用“删后插”以避免底层 update_rows 出现重复
+                # 有主键列：区分是否在显式事务内
                 pk_idx = col_names.index(pk_col)
                 affected = 0
+                processed_pks: set = set()
                 for r in self.executor.seq_scan(table_name):
                     vals = r.get_values()
                     try:
@@ -644,26 +647,40 @@ class HybridExecutionEngine:
                             new_vals[cidx] = str(v)
                         except ValueError:
                             continue
-                    # 按 PK 删除原行
                     pkv = str(vals[pk_idx]) if pk_idx < len(vals) else ""
-                    try:
-                        self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
-                    except Exception:
-                        pass
-                    # 插入新行
-                    ok = False
-                    try:
-                        ok = bool(self.executor.insert(table_name, new_vals))
-                    except Exception:
-                        ok = False
-                    if ok:
-                        affected += 1
-                        # 维护二级索引
+                    if pkv in processed_pks:
+                        # 同一主键只处理一次，避免多次插入
+                        continue
+                    processed_pks.add(pkv)
+                    if is_implicit_tx:
+                        # 自动提交：物化为 删后插
                         try:
-                            self.index_manager.on_delete(table_name, pkv)
-                            self.index_manager.on_insert(table_name, new_vals, col_names)
+                            self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
                         except Exception:
                             pass
+                        ok = False
+                        try:
+                            ok = bool(self.executor.insert(table_name, new_vals))
+                        except Exception:
+                            ok = False
+                        if ok:
+                            affected += 1
+                            try:
+                                self.index_manager.on_delete(table_name, pkv)
+                                self.index_manager.on_insert(table_name, new_vals, col_names)
+                            except Exception:
+                                pass
+                    else:
+                        # 显式事务：走 MVCC 覆盖层，避免查询期看到重复版本
+                        try:
+                            self.storage.mvcc_insert_uncommitted(table_name, list(new_vals), txid, pk_idx)
+                        except Exception:
+                            pass
+                        ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set(), "mvcc_inserts": set(), "mvcc_deletes": set()})
+                        ov["mvcc_inserts"].add(pkv)
+                        ov["mvcc_deletes"].add(pkv)
+                        ov["delete"].add(pkv)
+                        affected += 1
                 updated_count = affected
             else:
                 # 无法确定主键时，退回到底层批量更新
@@ -943,6 +960,28 @@ class HybridExecutionEngine:
                     out.append(CppRow(list(vis)))
             except Exception:
                 continue
+        return out
+
+    def _deduplicate_by_pk(self, table_name: str, rows):
+        """基于主键进行结果集去重：同一 PK 仅保留最后一个版本。"""
+        table_cols = self.table_columns.get(table_name, [])
+        pk_col = self._get_pk_column(table_name)
+        if not pk_col or pk_col not in table_cols:
+            return rows
+        pk_idx = table_cols.index(pk_col)
+        seen = set()
+        out = []
+        # 顺序扫描时，较新的版本通常在后；从后往前取第一条
+        for r in reversed(rows):
+            vals = r.get_values()
+            if pk_idx >= len(vals):
+                continue
+            pk = str(vals[pk_idx])
+            if pk in seen:
+                continue
+            seen.add(pk)
+            out.append(r)
+        out.reverse()
         return out
 
     def _execute_join(self, plan: Dict[str, Any]) -> Dict[str, Any]:

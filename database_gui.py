@@ -138,7 +138,7 @@ class DatabaseGUI:
 
         # 预设SQL示例
         sample_sql = """-- SQL示例 (点击执行按钮运行)
-CREATE TABLE students (id INT, name STRING, age INT, score DOUBLE);
+CREATE TABLE students (id INT PRIMARY KEY, name STRING, age INT, score DOUBLE);
 INSERT INTO students (id, name, age, score) VALUES (1, 'Alice', 20, 85.5);
 SELECT id, name, score FROM students WHERE age > 18;"""
         self.sql_text.insert(tk.END, sample_sql)
@@ -1918,7 +1918,7 @@ C++加速: {stats.get('cpp_enabled', False)}
     def load_sample_sql(self):
         """加载示例SQL"""
         sample_sql = """-- 数据库操作示例
-CREATE TABLE students (id INT, name STRING, age INT, score DOUBLE);
+CREATE TABLE students (id INT PRIMARY KEY, name STRING, age INT, score DOUBLE);
 INSERT INTO students (id, name, age, score) VALUES (1, 'Alice', 20, 85.5);
 INSERT INTO students (id, name, age, score) VALUES (2, 'Bob', 21, 92.0);
 INSERT INTO students (id, name, age, score) VALUES (3, 'Charlie', 19, 78.5);
