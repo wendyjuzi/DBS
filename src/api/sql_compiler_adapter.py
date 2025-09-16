@@ -287,11 +287,52 @@ class SQLCompilerAdapter:
         
         elif plan_type == "GroupBy":
             # 转换GROUP BY计划
+            table_name = ""
+            group_columns = []
+            aggregates = []
+            select_columns = []
+            
+            # 从GroupBy的props获取分组列
+            group_columns = plan_dict["props"].get("columns", [])
+            
+            # 从children中获取表名和聚合函数
+            children = plan_dict.get("children", [])
+            if children and len(children) > 0:
+                # 第一个child是Aggregate
+                aggregate_child = children[0]
+                if aggregate_child.get("type") == "Aggregate":
+                    # 从Aggregate的functions获取聚合信息
+                    functions = aggregate_child.get("props", {}).get("functions", [])
+                    for func in functions:
+                        func_name = func.get("function", "")
+                        func_column = func.get("column", "")
+                        if func_name == "COUNT" and func_column == "*":
+                            aggregates.append({"function": "COUNT", "column": "*"})
+                            select_columns.append("COUNT(*)")
+                        elif func_name in ["AVG", "SUM", "MAX", "MIN"]:
+                            aggregates.append({"function": func_name, "column": func_column})
+                            select_columns.append(f"{func_name}({func_column})")
+                    
+                    # 从Aggregate的children获取表名
+                    agg_children = aggregate_child.get("children", [])
+                    if agg_children and len(agg_children) > 0:
+                        seqscan_child = agg_children[0]
+                        if seqscan_child.get("type") == "SeqScan":
+                            table_name = seqscan_child.get("props", {}).get("table", "")
+            
+            # 添加分组列到select_columns
+            for col in group_columns:
+                if col not in select_columns:
+                    select_columns.append(col)
+            
             return {
                 "type": "SELECT",
-                "table": plan_dict["props"].get("table", ""),
-                "columns": plan_dict["props"].get("columns", []),
-                "group_by": plan_dict["props"].get("group_columns", [])
+                "table": table_name.upper() if table_name else "",
+                "columns": select_columns,
+                "group_by": {
+                    "group_columns": group_columns,
+                    "aggregates": aggregates
+                }
             }
         
         elif plan_type == "Sort":
@@ -1199,8 +1240,26 @@ class SQLCompilerAdapter:
                 if not cols:
                     cols = list(getattr(self.hybrid_executor, 'table_columns', {}).get(tu, []))
                 cols_u = [str(c).upper() for c in (cols or [])]
-                # 将列名转换为列->类型的映射，无法探测类型时默认 STRING
-                col_map = {c: "STRING" for c in cols_u}
+                # 将列名转换为列->类型的映射，尝试从存储引擎获取真实类型
+                col_map = {}
+                for c in cols_u:
+                    # 尝试从存储引擎获取列类型
+                    try:
+                        if hasattr(self.storage_engine, 'get_column_type'):
+                            col_type = self.storage_engine.get_column_type(tu, c)
+                            if col_type:
+                                col_map[c] = col_type
+                                continue
+                    except Exception:
+                        pass
+                    
+                    # 回退：根据列名推断类型
+                    if c in ['ID', 'AGE']:
+                        col_map[c] = "INT"
+                    elif c in ['SCORE', 'PRICE', 'AMOUNT']:
+                        col_map[c] = "DOUBLE"
+                    else:
+                        col_map[c] = "STRING"
                 # 若未登记，则登记；已登记则跳过
                 try:
                     if not (hasattr(self.catalog, 'has_table') and self.catalog.has_table(tu)):

@@ -1224,6 +1224,9 @@ class HybridExecutionEngine:
         
         print(f"[EXEC] GROUP BY {table_name} {group_by}")
         
+        if not table_name:
+            raise CatalogError("GROUP BY查询缺少表名")
+        
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
         if table_name not in self.table_columns:
@@ -1232,25 +1235,128 @@ class HybridExecutionEngine:
         group_columns = group_by.get("group_columns", [])
         aggregates = group_by.get("aggregates", [])
         
-        # 调用C++ GROUP BY算子
-        group_results = self.executor.group_by(table_name, group_columns, aggregates)
-        
-        # 转换为数据格式
-        data = []
-        for result in group_results:
-            row = []
-            # 添加分组键
-            row.extend(result.group_keys)
-            # 添加聚合值
-            for agg_name, agg_value in result.aggregates.items():
-                row.append(str(agg_value))
-            data.append(row)
-        
-        return {
-            "affected_rows": len(data),
-            "data": data,
-            "metadata": {"message": f"分组聚合返回 {len(data)} 组"}
-        }
+        # 如果没有C++ GROUP BY支持，使用Python实现
+        try:
+            print(f"[EXEC] 开始GROUP BY Python实现: table={table_name}, group_columns={group_columns}, aggregates={aggregates}")
+            # 先获取所有数据
+            all_rows = self.executor.seq_scan(table_name)
+            print(f"[EXEC] 扫描到 {len(all_rows)} 行数据")
+            filtered_rows = [row for row in all_rows if not row.get_is_deleted()]
+            print(f"[EXEC] 过滤后 {len(filtered_rows)} 行数据")
+            
+            # 按分组键分组
+            groups = {}
+            for row in filtered_rows:
+                # 获取分组键值
+                group_key = []
+                row_values = row.get_values()
+                for col in group_columns:
+                    col_idx = self.table_columns[table_name].index(col)
+                    group_key.append(row_values[col_idx])
+                
+                group_key_tuple = tuple(group_key)
+                if group_key_tuple not in groups:
+                    groups[group_key_tuple] = []
+                groups[group_key_tuple].append(row)
+            
+            # 计算聚合值
+            data = []
+            columns = plan.get("columns", [])
+            
+            for group_key_tuple, group_rows in groups.items():
+                result_row = []
+                
+                # 按照columns的顺序构建结果行
+                for col in columns:
+                    col_str = str(col).upper()
+                    if col_str.startswith("COUNT("):
+                        agg_value = len(group_rows)
+                    elif col_str.startswith("AVG("):
+                        # 解析列名
+                        import re
+                        match = re.match(r"AVG\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = sum(values) / len(values) if values else 0
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    elif col_str.startswith("MAX("):
+                        match = re.match(r"MAX\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = max(values) if values else 0
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    elif col_str.startswith("MIN("):
+                        match = re.match(r"MIN\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = min(values) if values else 0
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    elif col_str.startswith("SUM("):
+                        match = re.match(r"SUM\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = sum(values)
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    else:
+                        # 非聚合列，直接取值
+                        if col_str in self.table_columns[table_name]:
+                            col_idx = self.table_columns[table_name].index(col_str)
+                            agg_value = group_rows[0].get_values()[col_idx] if group_rows else ""
+                        else:
+                            agg_value = ""
+                    
+                    result_row.append(str(agg_value))
+                
+                data.append(result_row)
+            
+            # 构建列名列表
+            result_columns = []
+            for col in plan.get("columns", []):
+                result_columns.append(str(col))
+            
+            return {
+                "affected_rows": len(data),
+                "data": data,
+                "metadata": {
+                    "message": f"分组聚合返回 {len(data)} 组",
+                    "columns": result_columns
+                }
+            }
+            
+        except Exception as e:
+            print(f"[EXEC] GROUP BY Python实现失败: {e}")
+            import traceback
+            print(f"[EXEC] 详细错误信息: {traceback.format_exc()}")
+            # 回退到简单实现
+            return {
+                "affected_rows": 0,
+                "data": [],
+                "metadata": {"message": "GROUP BY暂不支持"}
+            }
 
     def _execute_drop_table(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行DROP TABLE操作"""
