@@ -453,13 +453,17 @@ public:
         auto schema_opt = storage.get_catalog().get_table_schema(table_name);
         if (!schema_opt) return all_rows;
         
-        // 读取所有页的Row
+        // 读取所有页的Row（仅返回未删除行）
         size_t max_page_id = storage.get_table_max_page_id(table_name);
         for (size_t page_id = 1; page_id <= max_page_id; page_id++) {
             auto page = storage.get_page(table_name, page_id);
             if (!page) continue;
             auto page_rows = page->get_rows();
-            all_rows.insert(all_rows.end(), page_rows.begin(), page_rows.end());
+            for (const auto& row : page_rows) {
+                if (!row->get_is_deleted()) {
+                    all_rows.push_back(row);
+                }
+            }
         }
         
         return all_rows;

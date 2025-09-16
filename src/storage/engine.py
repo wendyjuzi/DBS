@@ -12,8 +12,8 @@ from .file_storage import FileStorage
 from .buffer_pool import BufferPool
 from .page import Page
 from .constants import USER_DB_DIR, DEFAULT_CACHE_CAPACITY, DEFAULT_CACHE_STRATEGY
-from .wal import WALManager, LogRecord, Recovery
-from .transaction import TransactionManager, Transaction
+from ..utils.wal import WALManager, LogRecord, Recovery
+from ..utils.transaction import TransactionManager, Transaction
 
 logger = logging.getLogger(__name__)
 

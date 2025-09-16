@@ -44,6 +44,11 @@ class SQLCompilerAdapter:
         self.autocommit: bool = True
         self._txn_insert_buffer: Dict[str, List[List[str]]] = {}
         
+        # 性能优化：缓存机制
+        self._catalog_cache = {}  # 缓存目录信息
+        self._last_sync_time = 0  # 上次同步时间
+        self._sync_interval = 5.0  # 同步间隔（秒）
+        
         # 初始化存储/执行引擎
         if use_hybrid_storage and HYBRID_ENGINE_AVAILABLE:
             try:
@@ -104,6 +109,8 @@ class SQLCompilerAdapter:
     def sync_catalog(self) -> bool:
         """从底层存储同步编译器目录，供GUI/外部主动刷新使用。"""
         try:
+            # 强制刷新，忽略缓存
+            self._last_sync_time = 0
             self._sync_compiler_catalog_from_storage()
             return True
         except Exception:
@@ -287,11 +294,52 @@ class SQLCompilerAdapter:
         
         elif plan_type == "GroupBy":
             # 转换GROUP BY计划
+            table_name = ""
+            group_columns = []
+            aggregates = []
+            select_columns = []
+            
+            # 从GroupBy的props获取分组列
+            group_columns = plan_dict["props"].get("columns", [])
+            
+            # 从children中获取表名和聚合函数
+            children = plan_dict.get("children", [])
+            if children and len(children) > 0:
+                # 第一个child是Aggregate
+                aggregate_child = children[0]
+                if aggregate_child.get("type") == "Aggregate":
+                    # 从Aggregate的functions获取聚合信息
+                    functions = aggregate_child.get("props", {}).get("functions", [])
+                    for func in functions:
+                        func_name = func.get("function", "")
+                        func_column = func.get("column", "")
+                        if func_name == "COUNT" and func_column == "*":
+                            aggregates.append({"function": "COUNT", "column": "*"})
+                            select_columns.append("COUNT(*)")
+                        elif func_name in ["AVG", "SUM", "MAX", "MIN"]:
+                            aggregates.append({"function": func_name, "column": func_column})
+                            select_columns.append(f"{func_name}({func_column})")
+                    
+                    # 从Aggregate的children获取表名
+                    agg_children = aggregate_child.get("children", [])
+                    if agg_children and len(agg_children) > 0:
+                        seqscan_child = agg_children[0]
+                        if seqscan_child.get("type") == "SeqScan":
+                            table_name = seqscan_child.get("props", {}).get("table", "")
+            
+            # 添加分组列到select_columns
+            for col in group_columns:
+                if col not in select_columns:
+                    select_columns.append(col)
+            
             return {
                 "type": "SELECT",
-                "table": plan_dict["props"].get("table", ""),
-                "columns": plan_dict["props"].get("columns", []),
-                "group_by": plan_dict["props"].get("group_columns", [])
+                "table": table_name.upper() if table_name else "",
+                "columns": select_columns,
+                "group_by": {
+                    "group_columns": group_columns,
+                    "aggregates": aggregates
+                }
             }
         
         elif plan_type == "Sort":
@@ -1134,6 +1182,17 @@ class SQLCompilerAdapter:
 
     def _sync_compiler_catalog_from_storage(self) -> None:
         """将底层存储中的表结构同步到编译器目录中，避免语义阶段报表不存在。"""
+        import time
+        
+        # 性能优化：检查是否需要同步
+        current_time = time.time()
+        if (current_time - self._last_sync_time) < self._sync_interval and self._catalog_cache:
+            # 使用缓存，避免重复的C++模块访问
+            for table_name, table_info in self._catalog_cache.items():
+                if table_name not in self.catalog.tables:
+                    self.catalog.tables[table_name] = table_info
+            return
+        
         try:
             # 获取表名
             if hasattr(self.storage_engine, 'get_table_names'):
@@ -1199,16 +1258,39 @@ class SQLCompilerAdapter:
                 if not cols:
                     cols = list(getattr(self.hybrid_executor, 'table_columns', {}).get(tu, []))
                 cols_u = [str(c).upper() for c in (cols or [])]
-                # 将列名转换为列->类型的映射，无法探测类型时默认 STRING
-                col_map = {c: "STRING" for c in cols_u}
+                # 将列名转换为列->类型的映射，尝试从存储引擎获取真实类型
+                col_map = {}
+                for c in cols_u:
+                    # 尝试从存储引擎获取列类型
+                    try:
+                        if hasattr(self.storage_engine, 'get_column_type'):
+                            col_type = self.storage_engine.get_column_type(tu, c)
+                            if col_type:
+                                col_map[c] = col_type
+                                continue
+                    except Exception:
+                        pass
+                    
+                    # 回退：根据列名推断类型
+                    if c in ['ID', 'AGE']:
+                        col_map[c] = "INT"
+                    elif c in ['SCORE', 'PRICE', 'AMOUNT']:
+                        col_map[c] = "DOUBLE"
+                    else:
+                        col_map[c] = "STRING"
                 # 若未登记，则登记；已登记则跳过
                 try:
                     if not (hasattr(self.catalog, 'has_table') and self.catalog.has_table(tu)):
                         self.catalog.create_table(tu, col_map)
+                    # 更新缓存
+                    self._catalog_cache[tu] = col_map
                 except Exception:
                     pass
             except Exception:
                 continue
+        
+        # 更新同步时间
+        self._last_sync_time = current_time
 
     def _handle_create_index(self, sql: str) -> Dict[str, Any]:
         # 语法（增强版）：

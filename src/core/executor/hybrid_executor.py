@@ -78,6 +78,8 @@ class HybridExecutionEngine:
                 res = self._execute_delete(plan)
             elif t in ["DROP_TABLE", "DropTable"]:
                 res = self._execute_drop_table(plan)
+            elif t in ["Aggregate"]:
+                res = self._execute_aggregate(plan)
             else:
                 raise ExecutionError(f"不支持的查询计划类型: {t}")
             res["execution_time"] = time.time() - start_time
@@ -306,6 +308,8 @@ class HybridExecutionEngine:
             print(f"[EXEC] 过滤后 {len(filtered_rows)} 行")
         # MVCC：在投影前应用版本链可见性替换（调用C++可见性查询）
         filtered_rows = self._apply_mvcc_to_rows(table_name, filtered_rows)
+        # 去重：若存在主键，按主键保留最新版本（顺序扫描/插入顺序下，后出现的为新）
+        filtered_rows = self._deduplicate_by_pk(table_name, filtered_rows)
         # 聚合回退（无GROUP BY场景）：当目标列包含聚合表达式时，在Python侧聚合
         if self._has_aggregates(target_columns):
             projected_data, target_columns = self._aggregate_fallback(table_name, filtered_rows, target_columns)
@@ -627,9 +631,10 @@ class HybridExecutionEngine:
 
         if set_pairs:
             if pk_col and pk_col in col_names:
-                # 确认有主键列：总是采用“删后插”以避免底层 update_rows 出现重复
+                # 有主键列：区分是否在显式事务内
                 pk_idx = col_names.index(pk_col)
                 affected = 0
+                processed_pks: set = set()
                 for r in self.executor.seq_scan(table_name):
                     vals = r.get_values()
                     try:
@@ -644,26 +649,40 @@ class HybridExecutionEngine:
                             new_vals[cidx] = str(v)
                         except ValueError:
                             continue
-                    # 按 PK 删除原行
                     pkv = str(vals[pk_idx]) if pk_idx < len(vals) else ""
-                    try:
-                        self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
-                    except Exception:
-                        pass
-                    # 插入新行
-                    ok = False
-                    try:
-                        ok = bool(self.executor.insert(table_name, new_vals))
-                    except Exception:
-                        ok = False
-                    if ok:
-                        affected += 1
-                        # 维护二级索引
+                    if pkv in processed_pks:
+                        # 同一主键只处理一次，避免多次插入
+                        continue
+                    processed_pks.add(pkv)
+                    if is_implicit_tx:
+                        # 自动提交：物化为 删后插
                         try:
-                            self.index_manager.on_delete(table_name, pkv)
-                            self.index_manager.on_insert(table_name, new_vals, col_names)
+                            self.executor.delete_rows(table_name, lambda x, pv=pkv, i=pk_idx: i < len(x) and str(x[i]) == pv)
                         except Exception:
                             pass
+                        ok = False
+                        try:
+                            ok = bool(self.executor.insert(table_name, new_vals))
+                        except Exception:
+                            ok = False
+                        if ok:
+                            affected += 1
+                            try:
+                                self.index_manager.on_delete(table_name, pkv)
+                                self.index_manager.on_insert(table_name, new_vals, col_names)
+                            except Exception:
+                                pass
+                    else:
+                        # 显式事务：走 MVCC 覆盖层，避免查询期看到重复版本
+                        try:
+                            self.storage.mvcc_insert_uncommitted(table_name, list(new_vals), txid, pk_idx)
+                        except Exception:
+                            pass
+                        ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set(), "mvcc_inserts": set(), "mvcc_deletes": set()})
+                        ov["mvcc_inserts"].add(pkv)
+                        ov["mvcc_deletes"].add(pkv)
+                        ov["delete"].add(pkv)
+                        affected += 1
                 updated_count = affected
             else:
                 # 无法确定主键时，退回到底层批量更新
@@ -945,6 +964,28 @@ class HybridExecutionEngine:
                 continue
         return out
 
+    def _deduplicate_by_pk(self, table_name: str, rows):
+        """基于主键进行结果集去重：同一 PK 仅保留最后一个版本。"""
+        table_cols = self.table_columns.get(table_name, [])
+        pk_col = self._get_pk_column(table_name)
+        if not pk_col or pk_col not in table_cols:
+            return rows
+        pk_idx = table_cols.index(pk_col)
+        seen = set()
+        out = []
+        # 顺序扫描时，较新的版本通常在后；从后往前取第一条
+        for r in reversed(rows):
+            vals = r.get_values()
+            if pk_idx >= len(vals):
+                continue
+            pk = str(vals[pk_idx])
+            if pk in seen:
+                continue
+            seen.add(pk)
+            out.append(r)
+        out.reverse()
+        return out
+
     def _execute_join(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行JOIN操作"""
         tables = plan.get("tables", [])
@@ -1185,6 +1226,9 @@ class HybridExecutionEngine:
         
         print(f"[EXEC] GROUP BY {table_name} {group_by}")
         
+        if not table_name:
+            raise CatalogError("GROUP BY查询缺少表名")
+        
         if table_name not in self.table_columns:
             self._ensure_table_cached(table_name)
         if table_name not in self.table_columns:
@@ -1193,25 +1237,128 @@ class HybridExecutionEngine:
         group_columns = group_by.get("group_columns", [])
         aggregates = group_by.get("aggregates", [])
         
-        # 调用C++ GROUP BY算子
-        group_results = self.executor.group_by(table_name, group_columns, aggregates)
-        
-        # 转换为数据格式
-        data = []
-        for result in group_results:
-            row = []
-            # 添加分组键
-            row.extend(result.group_keys)
-            # 添加聚合值
-            for agg_name, agg_value in result.aggregates.items():
-                row.append(str(agg_value))
-            data.append(row)
-        
-        return {
-            "affected_rows": len(data),
-            "data": data,
-            "metadata": {"message": f"分组聚合返回 {len(data)} 组"}
-        }
+        # 如果没有C++ GROUP BY支持，使用Python实现
+        try:
+            print(f"[EXEC] 开始GROUP BY Python实现: table={table_name}, group_columns={group_columns}, aggregates={aggregates}")
+            # 先获取所有数据
+            all_rows = self.executor.seq_scan(table_name)
+            print(f"[EXEC] 扫描到 {len(all_rows)} 行数据")
+            filtered_rows = [row for row in all_rows if not row.get_is_deleted()]
+            print(f"[EXEC] 过滤后 {len(filtered_rows)} 行数据")
+            
+            # 按分组键分组
+            groups = {}
+            for row in filtered_rows:
+                # 获取分组键值
+                group_key = []
+                row_values = row.get_values()
+                for col in group_columns:
+                    col_idx = self.table_columns[table_name].index(col)
+                    group_key.append(row_values[col_idx])
+                
+                group_key_tuple = tuple(group_key)
+                if group_key_tuple not in groups:
+                    groups[group_key_tuple] = []
+                groups[group_key_tuple].append(row)
+            
+            # 计算聚合值
+            data = []
+            columns = plan.get("columns", [])
+            
+            for group_key_tuple, group_rows in groups.items():
+                result_row = []
+                
+                # 按照columns的顺序构建结果行
+                for col in columns:
+                    col_str = str(col).upper()
+                    if col_str.startswith("COUNT("):
+                        agg_value = len(group_rows)
+                    elif col_str.startswith("AVG("):
+                        # 解析列名
+                        import re
+                        match = re.match(r"AVG\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = sum(values) / len(values) if values else 0
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    elif col_str.startswith("MAX("):
+                        match = re.match(r"MAX\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = max(values) if values else 0
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    elif col_str.startswith("MIN("):
+                        match = re.match(r"MIN\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = min(values) if values else 0
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    elif col_str.startswith("SUM("):
+                        match = re.match(r"SUM\(([^)]+)\)", col_str)
+                        if match:
+                            col_name = match.group(1).strip()
+                            if col_name in self.table_columns[table_name]:
+                                col_idx = self.table_columns[table_name].index(col_name)
+                                values = [float(row.get_values()[col_idx]) for row in group_rows]
+                                agg_value = sum(values)
+                            else:
+                                agg_value = 0
+                        else:
+                            agg_value = 0
+                    else:
+                        # 非聚合列，直接取值
+                        if col_str in self.table_columns[table_name]:
+                            col_idx = self.table_columns[table_name].index(col_str)
+                            agg_value = group_rows[0].get_values()[col_idx] if group_rows else ""
+                        else:
+                            agg_value = ""
+                    
+                    result_row.append(str(agg_value))
+                
+                data.append(result_row)
+            
+            # 构建列名列表
+            result_columns = []
+            for col in plan.get("columns", []):
+                result_columns.append(str(col))
+            
+            return {
+                "affected_rows": len(data),
+                "data": data,
+                "metadata": {
+                    "message": f"分组聚合返回 {len(data)} 组",
+                    "columns": result_columns
+                }
+            }
+            
+        except Exception as e:
+            print(f"[EXEC] GROUP BY Python实现失败: {e}")
+            import traceback
+            print(f"[EXEC] 详细错误信息: {traceback.format_exc()}")
+            # 回退到简单实现
+            return {
+                "affected_rows": 0,
+                "data": [],
+                "metadata": {"message": "GROUP BY暂不支持"}
+            }
 
     def _execute_drop_table(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """执行DROP TABLE操作"""
@@ -1309,3 +1456,107 @@ class HybridExecutionEngine:
         else:
             print(f"❌ 不支持的导出格式: {format_type}")
             return False
+
+    def _execute_aggregate(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行聚合查询（无GROUP BY）"""
+        print(f"[EXEC] AGGREGATE {plan}")
+        
+        # 从children中获取表名
+        children = plan.get("children", [])
+        if not children:
+            raise ExecutionError("聚合查询缺少子计划")
+        
+        # 第一个child应该是SeqScan
+        seqscan_plan = children[0]
+        if seqscan_plan.get("type") != "SeqScan":
+            raise ExecutionError("聚合查询的子计划必须是SeqScan")
+        
+        table_name = seqscan_plan.get("props", {}).get("table", "")
+        if not table_name:
+            raise ExecutionError("聚合查询缺少表名")
+        
+        # 获取聚合函数
+        functions = plan.get("props", {}).get("functions", [])
+        if not functions:
+            raise ExecutionError("聚合查询缺少聚合函数")
+        
+        # 确保表结构已缓存
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        if table_name not in self.table_columns:
+            raise CatalogError(f"表 '{table_name}' 不存在")
+        
+        try:
+            # 获取所有数据
+            all_rows = self.executor.seq_scan(table_name)
+            filtered_rows = [row for row in all_rows if not row.get_is_deleted()]
+            
+            print(f"[EXEC] 聚合查询扫描到 {len(filtered_rows)} 行数据")
+            
+            # 计算聚合函数
+            result_row = []
+            result_columns = []
+            
+            for func in functions:
+                func_name = func.get("function", "")
+                func_column = func.get("column", "")
+                
+                if func_name == "COUNT" and func_column == "*":
+                    agg_value = len(filtered_rows)
+                    result_columns.append("COUNT(*)")
+                elif func_name == "AVG":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = sum(values) / len(values) if values else 0
+                        result_columns.append(f"AVG({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"AVG({func_column})")
+                elif func_name == "MAX":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = max(values) if values else 0
+                        result_columns.append(f"MAX({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"MAX({func_column})")
+                elif func_name == "MIN":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = min(values) if values else 0
+                        result_columns.append(f"MIN({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"MIN({func_column})")
+                elif func_name == "SUM":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = sum(values)
+                        result_columns.append(f"SUM({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"SUM({func_column})")
+                else:
+                    agg_value = 0
+                    result_columns.append(f"{func_name}({func_column})")
+                
+                result_row.append(str(agg_value))
+            
+            return {
+                "affected_rows": 1,
+                "data": [result_row],
+                "metadata": {
+                    "message": f"聚合查询返回 1 行",
+                    "columns": result_columns
+                }
+            }
+            
+        except Exception as e:
+            print(f"[EXEC] 聚合查询失败: {e}")
+            import traceback
+            print(f"[EXEC] 详细错误信息: {traceback.format_exc()}")
+            raise ExecutionError(f"聚合查询执行失败: {str(e)}")
