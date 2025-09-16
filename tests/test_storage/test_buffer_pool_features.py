@@ -1,5 +1,6 @@
 """
 测试缓存替换策略、预读机制和WAL日志恢复功能的测试文件
+python tests/test_storage/test_buffer_pool_features.py
 """
 
 import unittest

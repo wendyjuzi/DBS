@@ -909,6 +909,10 @@ SELECT id, name, score FROM students WHERE age > 18;"""
             # 还原分号
             stmt_sql = stmt + ';'
             self.result_text.insert(tk.END, f"\n-- [{idx}/{len(statements)}] {stmt_sql}\n")
+            
+            # 显示详细的编译过程（词法分析、语法分析、语义分析等）
+            self.run_detailed_compilation(stmt_sql)
+            
             try:
                 start_time = time.time()
                 if self.current_mode == "adapter":
