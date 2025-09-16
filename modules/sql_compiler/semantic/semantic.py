@@ -597,13 +597,13 @@ class SemanticAnalyzer:
                     if not self._column_exists_in_tables(tables, group_col.value):
                         raise SemanticError("ColumnError", group_col.value, "GROUP BY 中的列不存在")
 
-        # 检查 ORDER BY 子句
+        # 检查 ORDER BY 子句（支持表别名与 qualified 名称）
         order_by_node = next((child for child in ast.children if child.node_type == "ORDER_BY"), None)
         if order_by_node:
             for sort_col in order_by_node.children:
                 if sort_col.node_type == "SORT":
                     col_name = sort_col.value.split(":")[0]
-                    if not self._column_exists_in_tables(tables, col_name):
+                    if not self._column_exists_in_tables_with_aliases(tables, col_name, table_aliases):
                         raise SemanticError("ColumnError", col_name, "ORDER BY 中的列不存在")
 
         print(f"[OK] SELECT 语义检查通过")

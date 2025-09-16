@@ -855,3 +855,100 @@
 {"txid": "6c260160-f22d-4b32-8400-f67e68af7739", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "6c260160-f22d-4b32-8400-f67e68af7739", "op": "INSERT", "table": "ENROLLMENTS", "payload": {"values": ["4", "104", "87.0", "Fall2023"]}}
 {"txid": "6c260160-f22d-4b32-8400-f67e68af7739", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "36d99e5d-30ba-4ae2-a85b-55736c37929a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "36d99e5d-30ba-4ae2-a85b-55736c37929a", "op": "DELETE", "table": "ENROLLMENTS", "payload": {"where": null}}
+{"txid": "36d99e5d-30ba-4ae2-a85b-55736c37929a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "be0b5129-27a3-498e-8ade-153a54449ce1", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "be0b5129-27a3-498e-8ade-153a54449ce1", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9d5d7b5b-a6f4-4998-9e1f-04b311513a42", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9d5d7b5b-a6f4-4998-9e1f-04b311513a42", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "0366ba67-4a42-416e-b777-94d4615f02ac", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "0366ba67-4a42-416e-b777-94d4615f02ac", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "6670d232-4dbd-4970-a816-134817a940d8", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "6670d232-4dbd-4970-a816-134817a940d8", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "015a965a-d3ae-4890-a5f7-fee22775b043", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "015a965a-d3ae-4890-a5f7-fee22775b043", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "aef502bc-86ad-4307-a53f-eaa51ae25f52", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "aef502bc-86ad-4307-a53f-eaa51ae25f52", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "34ce3f00-1194-4635-a9d1-e31b5f9243d3", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "34ce3f00-1194-4635-a9d1-e31b5f9243d3", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "1df2a7bb-e5b1-443c-9b40-004e08628f8d", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1df2a7bb-e5b1-443c-9b40-004e08628f8d", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b1df5642-2134-4e8a-98dc-966ecbcf7efb", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b1df5642-2134-4e8a-98dc-966ecbcf7efb", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "8760f443-ddc3-4e37-9bef-cfc247d463fd", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "8760f443-ddc3-4e37-9bef-cfc247d463fd", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "8760f443-ddc3-4e37-9bef-cfc247d463fd", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "8760f443-ddc3-4e37-9bef-cfc247d463fd", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "8760f443-ddc3-4e37-9bef-cfc247d463fd", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "0b1e0daa-dda4-42e9-bd95-2251b052656b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "915b604c-d226-413c-bd6d-9201fba4eb05", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "915b604c-d226-413c-bd6d-9201fba4eb05", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "915b604c-d226-413c-bd6d-9201fba4eb05", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "915b604c-d226-413c-bd6d-9201fba4eb05", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "915b604c-d226-413c-bd6d-9201fba4eb05", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "e7dc427d-5ecf-4ba7-826d-7779e414eed2", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "81b5a177-98f2-4bd5-916b-0c2ca6fd1c67", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "81b5a177-98f2-4bd5-916b-0c2ca6fd1c67", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "81b5a177-98f2-4bd5-916b-0c2ca6fd1c67", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "81b5a177-98f2-4bd5-916b-0c2ca6fd1c67", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "81b5a177-98f2-4bd5-916b-0c2ca6fd1c67", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "9895ddbf-c7e3-4b1e-af6d-d9651ff41a7c", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "2773fb3d-2897-4157-975c-220afbbf4465", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "2773fb3d-2897-4157-975c-220afbbf4465", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "2773fb3d-2897-4157-975c-220afbbf4465", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "2773fb3d-2897-4157-975c-220afbbf4465", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "2773fb3d-2897-4157-975c-220afbbf4465", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "1"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "2"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
+{"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "COMMIT", "table": null, "payload": {}}

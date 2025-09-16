@@ -121,7 +121,11 @@ class SQLCompilerAdapter:
         将SQL编译器的计划格式转换为执行器期望的格式
         不修改编译器，只做格式转换
         """
-        plan_dict = compiler_plan.to_dict()
+        # 处理字典和对象两种情况
+        if isinstance(compiler_plan, dict):
+            plan_dict = compiler_plan
+        else:
+            plan_dict = compiler_plan.to_dict()
         plan_type = plan_dict.get("type")
         
         print(f"[ADAPTER] 转换计划类型: {plan_type}")
@@ -292,10 +296,22 @@ class SQLCompilerAdapter:
         
         elif plan_type == "Delete":
             # 转换DELETE计划
+            table_name = plan_dict["props"]["table"].upper()
+            where_clause = []
+            
+            # 从children中提取WHERE条件
+            children = plan_dict.get("children", [])
+            for child in children:
+                if child.get("type") == "SeqScan":
+                    conditions = child.get("props", {}).get("conditions", [])
+                    if conditions:
+                        where_clause = conditions
+                        break
+            
             return {
                 "type": "DELETE",
-                "table": plan_dict["props"]["table"].upper(),
-                "where_clause": plan_dict["props"].get("where_clause", {})
+                "table": table_name,
+                "where_clause": where_clause
             }
         
         elif plan_type == "DropTable":
@@ -399,13 +415,22 @@ class SQLCompilerAdapter:
             return out
         
         elif plan_type == "Sort":
-            # 转换ORDER BY计划
-            return {
-                "type": "SELECT",
-                "table": plan_dict["props"].get("table", ""),
-                "columns": plan_dict["props"].get("columns", []),
-                "order_by": plan_dict["props"].get("order_columns", [])
-            }
+            # 转换ORDER BY计划 - 需要递归处理子计划
+            children = plan_dict.get("children", [])
+            if children:
+                # 递归转换子计划
+                child_plan = self._convert_plan_to_executor_format(children[0])
+                # 添加ORDER BY信息
+                child_plan["order_by"] = plan_dict["props"].get("columns", [])
+                return child_plan
+            else:
+                # 没有子计划，返回基本格式
+                return {
+                    "type": "SELECT",
+                    "table": plan_dict["props"].get("table", ""),
+                    "columns": plan_dict["props"].get("columns", []),
+                    "order_by": plan_dict["props"].get("columns", [])
+                }
         
         else:
             # 未知类型，直接返回原始格式

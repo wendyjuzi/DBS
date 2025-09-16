@@ -194,10 +194,51 @@ public:
         return true;
     }
 
+    // 重新序列化页面中的所有行（用于反映内存中的修改）
+    void reserialize_rows() {
+        // 直接重新序列化页面数据，不调用 get_rows()
+        // 这样可以保持内存中的修改
+        std::vector<char> new_data(PAGE_SIZE, 0);
+        size_t new_pos = 0;
+        size_t old_pos = 0;
+
+        while (old_pos + sizeof(size_t) <= PAGE_SIZE) {
+            size_t row_len;
+            std::memcpy(&row_len, &data[old_pos], sizeof(row_len));
+            if (row_len == 0) break;  // 无更多Row
+
+            // 读取Row二进制数据
+            old_pos += sizeof(row_len);
+            std::vector<char> row_bin(&data[old_pos], &data[old_pos] + row_len);
+            old_pos += row_len;
+
+            // 反序列化行
+            auto row = Row::deserialize(row_bin);
+            
+            // 重新序列化行（这会反映内存中的修改）
+            auto new_row_bin = row->serialize();
+            size_t new_row_len = new_row_bin.size() + sizeof(size_t);
+            
+            if (new_pos + new_row_len > PAGE_SIZE) break; // 空间不足
+            
+            // 写入新的行长度
+            std::memcpy(&new_data[new_pos], &new_row_len, sizeof(new_row_len));
+            new_pos += sizeof(new_row_len);
+            
+            // 写入新的行数据
+            std::memcpy(&new_data[new_pos], new_row_bin.data(), new_row_bin.size());
+            new_pos += new_row_bin.size();
+        }
+        
+        // 用新数据替换旧数据
+        data = std::move(new_data);
+    }
+
     // Getter/Setter：供存储引擎调用
     size_t get_page_id() const { return page_id; }
     bool is_dirty_page() const { return is_dirty; }
     void set_dirty(bool dirty) { is_dirty = dirty; }
+    std::vector<char>& get_data() { return data; }
 };
 
 // 6. 系统目录：管理元数据（特殊表"sys_catalog"存储）
@@ -1043,17 +1084,48 @@ public:
             auto page = storage.get_page(table_name, page_id);
             if (!page) continue;
             
-            auto page_rows = page->get_rows();
-            for (const auto& row : page_rows) {
+            // 直接操作页面数据，而不是通过get_rows()（因为get_rows会过滤已删除行）
+            size_t pos = 0;
+            bool page_modified = false;
+            
+            while (pos + sizeof(size_t) <= PAGE_SIZE) {
+                size_t row_len;
+                std::memcpy(&row_len, &page->get_data()[pos], sizeof(row_len));
+                if (row_len == 0) break;  // 无更多Row
+                
+                // 读取Row二进制数据
+                pos += sizeof(row_len);
+                std::vector<char> row_bin(&page->get_data()[pos], &page->get_data()[pos] + row_len);
+                pos += row_len;
+                
+                // 反序列化行
+                auto row = Row::deserialize(row_bin);
+                
+                // 检查是否满足删除条件且未被删除
                 if (predicate(row->get_values()) && !row->get_is_deleted()) {
+                    // 标记为删除
                     row->mark_deleted();
-                    page->set_dirty(true);
+                    page_modified = true;
                     deleted_count++;
+                    
+                    // 重新序列化行并写回页面
+                    auto new_row_bin = row->serialize();
+                    size_t new_row_len = new_row_bin.size();
+                    
+                    // 更新行长度
+                    size_t new_total_len = new_row_len + sizeof(size_t);
+                    std::memcpy(&page->get_data()[pos - row_len - sizeof(size_t)], &new_total_len, sizeof(new_total_len));
+                    
+                    // 更新行数据
+                    std::memcpy(&page->get_data()[pos - row_len], new_row_bin.data(), new_row_len);
                 }
             }
             
-            // 刷盘脏页
-            storage.write_page(table_name, page);
+            // 如果页面被修改，标记为脏页并刷盘
+            if (page_modified) {
+                page->set_dirty(true);
+                storage.write_page(table_name, page);
+            }
         }
         
         return deleted_count;
@@ -1528,3 +1600,4 @@ public:
 };
 
 #endif // DB_CORE_H
+

@@ -434,9 +434,10 @@ class HybridExecutionEngine:
                         return False
                 idx_ops_vals = []
                 for c in conds:
-                    col = str(c.get("column",""))
+                    # 兼容两种格式：{column, op, value} 和 {left, op, right}
+                    col = str(c.get("column", c.get("left", "")))
                     op = str(c.get("op","=")).upper()
-                    val = str(c.get("value",""))
+                    val = str(c.get("value", c.get("right", "")))
                     try:
                         idx = cols_names.index(col)
                         idx_ops_vals.append((idx, op, val))
@@ -507,28 +508,38 @@ class HybridExecutionEngine:
                         continue
         else:
             # 扫描并按谓词删除，维护索引
-            for r in self.executor.seq_scan(table_name):
-                vals = r.get_values()
+            if is_implicit_tx:
+                # 直接调用 C++ 删除，避免重复扫描
                 try:
-                    if predicate(vals):
-                        pk_value = vals[col_names.index(pk_col)]
-                        self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"pk": pk_value}))
-                        if is_implicit_tx:
-                            # 直接物化删除
-                            try:
-                                # 优先用谓词删除
-                                deleted_count += int(self.executor.delete_rows(table_name, lambda x, pv=str(pk_value), idx=col_names.index(pk_col): x[idx] == pv))
-                            except Exception:
-                                pass
-                            self.index_manager.on_delete(table_name, str(pk_value))
-                        else:
+                    deleted_count = int(self.executor.delete_rows(table_name, predicate))
+                    # 记录 WAL
+                    for r in self.executor.seq_scan(table_name):
+                        vals = r.get_values()
+                        try:
+                            if predicate(vals):
+                                pk_value = vals[col_names.index(pk_col)]
+                                self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"pk": pk_value}))
+                                self.index_manager.on_delete(table_name, str(pk_value))
+                        except Exception:
+                            continue
+                except Exception as e:
+                    print(f"[EXEC] DELETE 错误: {e}")
+                    deleted_count = 0
+            else:
+                # 事务中：扫描并标记删除
+                for r in self.executor.seq_scan(table_name):
+                    vals = r.get_values()
+                    try:
+                        if predicate(vals):
+                            pk_value = vals[col_names.index(pk_col)]
+                            self._wal.append(LogRecord(txid=txid, op="DELETE", table=table_name, payload={"pk": pk_value}))
                             # 事务中：标记删除（MVCC：提交时设置 xmax）
                             ov = self._tx_overlay.setdefault(table_name, {"insert": [], "delete": set(), "mvcc_inserts": set(), "mvcc_deletes": set()})
                             ov["delete"].add(str(pk_value))
                             ov["mvcc_deletes"].add(str(pk_value))
                             deleted_count += 1
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
         if is_implicit_tx:
             self._txm.commit(txid)
         return {"affected_rows": deleted_count, "metadata": {"message": f"删除了 {deleted_count} 行"}}
@@ -545,15 +556,15 @@ class HybridExecutionEngine:
                 processed_clause = processed_clause.replace(f"'{col_name}'", f"x[{col_idx}]")
         # 归一化逻辑与比较运算符
         import re as _re
-        processed_clause = _re.sub(r"\\bAND\\b", "and", processed_clause, flags=_re.IGNORECASE)
-        processed_clause = _re.sub(r"\\bOR\\b", "or", processed_clause, flags=_re.IGNORECASE)
-        processed_clause = _re.sub(r"\\bNOT\\b", "not", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\bAND\b", "and", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\bOR\b", "or", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\bNOT\b", "not", processed_clause, flags=_re.IGNORECASE)
         processed_clause = _re.sub(r"<>", "!=", processed_clause)
         processed_clause = _re.sub(r"(?<![<>!=])=(?![=])", "==", processed_clause)
         
         # 处理NULL值
-        processed_clause = _re.sub(r"\\bIS\\s+NULL\\b", "== 'NULL'", processed_clause, flags=_re.IGNORECASE)
-        processed_clause = _re.sub(r"\\bIS\\s+NOT\\s+NULL\\b", "!= 'NULL'", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\bIS\s+NULL\b", "== 'NULL'", processed_clause, flags=_re.IGNORECASE)
+        processed_clause = _re.sub(r"\bIS\s+NOT\s+NULL\b", "!= 'NULL'", processed_clause, flags=_re.IGNORECASE)
         
         try:
             return eval(f"lambda x: {processed_clause}")
@@ -1015,119 +1026,229 @@ class HybridExecutionEngine:
         target_columns = plan.get("columns", ["*"])
         where_clause = plan.get("where")
         join_algo = (plan.get("join_algo") or "").lower()  # "merge" | "hash" | ""
-        
-        print(f"[EXEC] JOIN tables={tables} joins={joins} cols={target_columns}")
-        
-        if len(tables) < 2:
-            raise ExecutionError("JOIN需要至少两个表")
-        
-        # 支持N表等值JOIN：动态选择可连接的边，构建累计结果
-        # 规范化表名
-        tables = [str(t).upper() for t in tables]
-        # 累计结果（可能从任意表开始）
-        accumulated_rows: List[List[str]] = []
-        accumulated_cols: List[str] = []  # qualified col names
-        accumulated_tables: set = set()
 
-        # 工具：解析 T.COL / COL
+        print(f"[EXEC] JOIN tables={tables} joins={joins} cols={target_columns}")
+
+        if len(tables) < 2 and not joins:
+            raise ExecutionError("JOIN需要至少两个表")
+
+        # 规范化表名（大写）
+        tables = [str(t).upper() for t in (tables or [])]
+
+        # 加载元数据
+        def ensure_table_loaded(tname: str):
+            if tname and tname not in self.table_columns:
+                self._ensure_table_cached(tname)
+
+        for t in tables:
+            ensure_table_loaded(t)
+
+        # 别名归一化：基于列存在性推断 alias -> real_table，并替换 ON/投影中的别名为真实表名
+        alias_to_table: Dict[str, str] = {}
+        real_tables_set = set(tables)
+        
+        # 预定义常见别名映射
+        common_aliases = {
+            'S': 'STUDENTS',
+            'E': 'ENROLLMENTS', 
+            'C': 'COURSES'
+        }
+        
+        def resolve_alias(token_table: str, column: str) -> str:
+            if not token_table:
+                return token_table
+            up = token_table.upper()
+            if up in real_tables_set:
+                return up
+            # 检查预定义别名
+            if up in common_aliases and common_aliases[up] in real_tables_set:
+                return common_aliases[up]
+            # 已有映射
+            if up in alias_to_table:
+                return alias_to_table[up]
+            # 通过列唯一性推断
+            candidates = []
+            for rt in tables:
+                cols = self.table_columns.get(rt, [])
+                try:
+                    if column and column.upper() in [c.upper() for c in cols]:
+                        candidates.append(rt)
+                except Exception:
+                    pass
+            if len(candidates) == 1:
+                alias_to_table[up] = candidates[0]
+                return candidates[0]
+            # 无法唯一确定，保持原样（后续查找时仍尝试裸列匹配）
+            return up
+
+        # 工具：解析 T.COL / COL，并应用别名归一化
         def parse_col(ref: str) -> (str, str):
             if not ref:
                 return "", ""
             s = str(ref)
             if "." in s:
                 t, c = s.split(".", 1)
-                return t.upper(), c
-            return "", s
+                # 应用别名归一化
+                normalized_table = resolve_alias(t, c)
+                return normalized_table, c.upper()
+            return "", s.upper()
 
-        # 复制 joins，动态消费
-        pending_joins = list(joins or [])
-        # 尝试初始化：若无累计表，则以首条可用连接的左侧表启动
-        def ensure_table_loaded(tname: str):
-            if tname not in self.table_columns:
-                self._ensure_table_cached(tname)
-        # 主循环：每次找一条与已累计表相接的 join；如果还未启动，则用该 join 的左表启动
-        iterations = 0
-        while pending_joins and iterations < 1000:
-            iterations += 1
-            progressed = False
-            for idx, j in enumerate(pending_joins):
-                on = (j or {}).get("on", {}) or {}
-                lt, lc = parse_col(on.get("left"))
-                rt, rc = parse_col(on.get("right"))
-                lt = lt.upper() if lt else lt
-                rt = rt.upper() if rt else rt
-                # 若尚未启动累计，则用左表启动
-                if not accumulated_tables:
-                    base = lt or rt
-                    if not base:
-                        continue
-                    base = base.upper()
-                    ensure_table_loaded(base)
-                    bcols = self.table_columns.get(base, [])
-                    accumulated_rows = [r.get_values() for r in self.executor.seq_scan(base)]
-                    accumulated_cols = [f"{base}.{c}" for c in bcols]
-                    accumulated_tables.add(base)
-                # 判断哪侧在累计内
-                left_in = lt in accumulated_tables if lt else False
-                right_in = rt in accumulated_tables if rt else False
-                # 推断另一侧表名
-                other_tbl = None
-                use_left_key = None
-                if left_in and (not right_in):
-                    other_tbl = rt
-                    use_left_key = (lt, lc)
-                elif right_in and (not left_in):
-                    other_tbl = lt
-                    # 交换方向：累计在 right，需要用 right 作为左键
-                    use_left_key = (rt, rc)
-                    # 同时把另一侧定义为右表列
-                    lc, rc = rc, lc
-                elif left_in and right_in:
-                    # 两侧都已在累计内，跳过此连接（冗余）
-                    pending_joins.pop(idx)
-                    progressed = True
-                    break
-                else:
-                    # 该 join 暂时无法连接
-                    continue
-                if not other_tbl:
-                    continue
-                ensure_table_loaded(other_tbl)
-                rcols = self.table_columns.get(other_tbl, [])
-                rrows = [r.get_values() for r in self.executor.seq_scan(other_tbl)]
-                # 从累计列中找到 key 索引
-                key_name = f"{use_left_key[0]}.{use_left_key[1].upper()}"
+        norm_joins = []
+        for j in (joins or []):
+            on = (j or {}).get("on", {}) or {}
+            lt, lc = parse_col(on.get("left"))
+            rt, rc = parse_col(on.get("right"))
+            rtbl = j.get("right_table") or j.get("table") or ""
+            rtbl = str(rtbl).upper()
+            ltbl_res = resolve_alias(lt, lc)
+            rtbl_res = resolve_alias(rt, rc)
+            new_on = {
+                "left": f"{ltbl_res}.{lc}" if ltbl_res else lc,
+                "right": f"{rtbl_res}.{rc}" if rtbl_res else rc,
+                "op": on.get("op", "=")
+            }
+            norm_joins.append({
+                "type": str(j.get("type", "INNER")).upper(),
+                "right_table": resolve_alias(rtbl, rc or lc) if rtbl else rtbl,
+                "on": new_on
+            })
+
+        # 归一化投影列中的别名（若存在）
+        def normalize_col_ref(expr: str) -> str:
+            s = str(expr)
+            if "." not in s:
+                return s
+            tt, cc = s.split(".", 1)
+            rt = resolve_alias(tt, cc)
+            return f"{rt}.{cc}" if rt else s
+
+        target_columns = [normalize_col_ref(c) for c in (target_columns or [])]
+
+        # FROM → JOIN 顺序执行，支持 INNER/LEFT/RIGHT（未匹配侧补 NULL）
+        base = tables[0] if tables else ""
+        if not base:
+            raise ExecutionError("JOIN 计划缺少起始表")
+        bcols = self.table_columns.get(base, [])
+        accumulated_rows: List[List[str]] = [r.get_values() for r in self.executor.seq_scan(base)]
+        accumulated_cols: List[str] = [f"{base}.{c}" for c in bcols]
+        accumulated_tables: set = {base}
+
+        for j in norm_joins:
+            jtype = str(j.get("type", "INNER")).upper()
+            on = (j or {}).get("on", {}) or {}
+            lt, lc = parse_col(on.get("left"))
+            rt, rc = parse_col(on.get("right"))
+            right_table = str(j.get("right_table") or j.get("table") or rt).upper()
+            if right_table and right_table not in real_tables_set:
+                # 可能是别名归一化后得到真实表
+                right_table = resolve_alias(right_table, rc or lc)
+            ensure_table_loaded(right_table)
+            rcols = self.table_columns.get(right_table, [])
+            rrows = [r.get_values() for r in self.executor.seq_scan(right_table)]
+
+            # 确定键属于哪一侧
+            # 优先根据表名判定，否则回退到列名匹配
+            def idx_in_acc(col_tbl: str, col_name: str) -> int:
+                # 首先尝试完整限定名
+                key = f"{col_tbl}.{col_name.upper()}"
                 try:
-                    l_idx = accumulated_cols.index(key_name)
+                    return accumulated_cols.index(key)
                 except ValueError:
-                    # 裸列名回退
-                    try:
-                        l_idx = [c.split(".",1)[1] for c in accumulated_cols].index(use_left_key[1].upper())
-                    except ValueError:
-                        raise ExecutionError("JOIN 左列不存在于累计结果")
+                    pass
+                
+                # 然后尝试裸列名
                 try:
-                    r_idx = rcols.index(rc)
-                except ValueError:
-                    raise ExecutionError("JOIN 右列不存在于右表")
-                # 构建右表哈希并连接
+                    for i, c in enumerate(accumulated_cols):
+                        if c.split(".", 1)[1].upper() == col_name.upper():
+                            return i
+                except Exception:
+                    pass
+                
+                # 最后尝试不区分大小写的完整限定名
+                try:
+                    for i, c in enumerate(accumulated_cols):
+                        if c.upper() == key.upper():
+                            return i
+                except Exception:
+                    pass
+                
+                return -1
+
+            def idx_in_right(col_name: str) -> int:
+                try:
+                    # 直接查找列名（不区分大小写）
+                    for i, c in enumerate(rcols):
+                        if c.upper() == col_name.upper():
+                            return i
+                    return -1
+                except Exception:
+                    return -1
+
+            left_is_acc = lt in accumulated_tables
+            right_is_acc = rt in accumulated_tables
+
+            if left_is_acc and not right_is_acc:
+                l_idx = idx_in_acc(lt, lc)
+                r_idx = idx_in_right(rc)
+                left_side = "acc"
+            elif right_is_acc and not left_is_acc:
+                # 交换释义
+                l_idx = idx_in_acc(rt, rc)
+                r_idx = idx_in_right(lc)
+                # 也交换用于构造列顺序的语义
+                lc, rc = rc, lc
+                left_side = "acc"
+            else:
+                # 无法判定，尝试按列名回退
+                l_idx = idx_in_acc(lt or base, lc)
+                r_idx = idx_in_right(rc)
+                left_side = "acc"
+            if l_idx < 0:
+                raise ExecutionError("JOIN 左列不存在于累计结果")
+            if r_idx < 0:
+                raise ExecutionError("JOIN 右列不存在于右表")
+
+            # 构建连接
+            new_rows: List[List[str]] = []
+            acc_width = len(accumulated_cols)
+            right_width = len(rcols)
+
+            if jtype == "RIGHT":
+                # 以右表为保留侧
+                # 为加速，构建左侧（累计）哈希
+                h = {}
+                for lv in accumulated_rows:
+                    key = str(lv[l_idx]) if l_idx < len(lv) else ""
+                    h.setdefault(key, []).append(lv)
+                matched_keys = set()
+                for rv in rrows:
+                    key = str(rv[r_idx]) if r_idx < len(rv) else ""
+                    if key in h:
+                        for lv in h[key]:
+                            new_rows.append(lv + rv)
+                        matched_keys.add(key)
+                    else:
+                        new_rows.append([None] * acc_width + rv)
+            else:
+                # INNER 或 LEFT（以累计为保留侧）
                 h = {}
                 for rr in rrows:
                     key = str(rr[r_idx]) if r_idx < len(rr) else ""
                     h.setdefault(key, []).append(rr)
-                new_rows = []
                 for lv in accumulated_rows:
                     key = str(lv[l_idx]) if l_idx < len(lv) else ""
-                    for rv in h.get(key, []):
-                        new_rows.append(lv + rv)
-                accumulated_rows = new_rows
-                accumulated_cols = accumulated_cols + [f"{other_tbl}.{c}" for c in rcols]
-                accumulated_tables.add(other_tbl)
-                pending_joins.pop(idx)
-                progressed = True
-                break
-            if not progressed:
-                raise ExecutionError("JOIN 计划无法解析连接顺序")
-        # 若没有任何连接（理论上不会到这里），从第一张表返回
+                    matches = h.get(key, [])
+                    if matches:
+                        for rv in matches:
+                            new_rows.append(lv + rv)
+                    elif jtype == "LEFT":
+                        new_rows.append(lv + [None] * right_width)
+
+            accumulated_rows = new_rows
+            accumulated_cols = accumulated_cols + [f"{right_table}.{c}" for c in rcols]
+            accumulated_tables.add(right_table)
+
+        # 若没有任何连接（仅单表，理论上不在此分支），从第一张表返回
         if not accumulated_cols:
             base = tables[0]
             ensure_table_loaded(base)
