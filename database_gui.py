@@ -775,6 +775,9 @@ SELECT id, name, score FROM students WHERE age > 18;"""
         menu_dist.add_separator()
         menu_dist.add_command(label="显示分片热力图", command=self.show_shard_heatmap)
         menu_dist.add_command(label="显示并行时间线", command=self.show_timeline)
+        menu_dist.add_separator()
+        menu_dist.add_command(label="分片重平衡(示例)", command=self.rebalance_shards_demo)
+        menu_dist.add_command(label="热点分片警示", command=self.hot_shard_alert)
         menu_dist.add_command(label="查看慢日志", command=self.show_slowlog)
         menubar.add_cascade(label="分布式", menu=menu_dist)
 
@@ -1017,6 +1020,42 @@ SELECT id, name, score FROM students WHERE age > 18;"""
             self.result_text.insert(tk.END, "\n")
         except Exception as e:
             self.log(f"时间线失败: {e}")
+
+    def rebalance_shards_demo(self):
+        """示例：把范围 [8,~) 的部分键移动到新分片（演示层面，实际不移动数据）。"""
+        try:
+            if not (self.dist_router and self.dist_meta):
+                self.log("请先初始化分布式")
+                return
+            self.result_text.insert(tk.END, "[重平衡演示] 目前分片: \n")
+            for s in self.dist_router.all_shards('T'):
+                self.result_text.insert(tk.END, f"- {s}\n")
+            self.result_text.insert(tk.END, "(演示) 将新增一个范围分片接管 [8,~)\n")
+            self.result_text.insert(tk.END, "提示：真实数据迁移不在演示范围，需后端任务调度\n\n")
+        except Exception as e:
+            self.log(f"重平衡失败: {e}")
+
+    def hot_shard_alert(self):
+        """基于每片行数和慢日志粗略报警热点分片。"""
+        try:
+            if not (self.dist_router and self.dist_nodes):
+                self.log("请先初始化分布式")
+                return
+            shards = self.dist_router.all_shards('T')
+            rows_per = {}
+            for s in shards:
+                sid = s.get('id')
+                node = self.dist_nodes.get(sid) or next(iter(self.dist_nodes.values()))
+                res = node.execute('SELECT id,name FROM T;')
+                rows_per[sid] = len((res or {}).get('data', [])) if isinstance(res, dict) else 0
+            avg = (sum(rows_per.values())/len(rows_per)) if shards else 0
+            self.result_text.insert(tk.END, "热点分片检测\n")
+            for sid, n in rows_per.items():
+                mark = "🔥" if n > avg * 1.5 else ""
+                self.result_text.insert(tk.END, f"- {sid}: rows={n} {mark}\n")
+            self.result_text.insert(tk.END, "\n")
+        except Exception as e:
+            self.log(f"热点检测失败: {e}")
 
     def run_distributed_select(self):
         """分布式合并查询"""

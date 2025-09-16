@@ -1679,7 +1679,7 @@ class SQLCompilerAdapter:
             inserted = 0
             cols = self.hybrid_executor.table_columns.get(table, [])
             batch: list[list[str]] = []
-            batch_size = 1000
+            batch_size = 5000
             def _flush_batch():
                 nonlocal inserted, batch
                 if not batch:

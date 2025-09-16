@@ -231,17 +231,35 @@ class HybridExecutionEngine:
                 col = cond.get("column"); op = cond.get("op"); val = str(cond.get("value"))
                 if col in self.table_columns[table_name]:
                     pushdown.append((self.table_columns[table_name].index(col), op, val))
-        # 尝试使用内存二级索引加速：等值或范围
+        # 尝试使用内存二级索引加速：等值、范围与“多条件等值交集”
         if filter_conditions:
             try:
-                # 优先使用等值条件
+                # 优先：单个等值命中 → 直接回表
                 for cond in filter_conditions:
                     col = cond.get("column"); op = (cond.get("op") or "").strip(); val = str(cond.get("value"))
                     if op == "=" and self.index_manager.has_index(table_name, col):
                         pks = self.index_manager.lookup_pks(table_name, col, val)
                         if pks:
                             return self.select_by_pk_values(table_name, target_columns, pks)
-                # 尝试范围条件（需要相同列上的单个范围）
+
+                # 新增：多条件等值交集（在不同已建索引列上的 AND 等值）
+                eq_sets = []
+                for cond in filter_conditions:
+                    col = cond.get("column"); op = (cond.get("op") or "").strip(); val = str(cond.get("value"))
+                    if op == "=" and self.index_manager.has_index(table_name, col):
+                        s = set(self.index_manager.lookup_pks(table_name, col, val))
+                        if s:
+                            eq_sets.append(s)
+                if len(eq_sets) >= 2:
+                    inter = eq_sets[0]
+                    for s in eq_sets[1:]:
+                        inter = inter.intersection(s)
+                        if not inter:
+                            break
+                    if inter:
+                        return self.select_by_pk_values(table_name, target_columns, list(inter))
+
+                # 范围：需要相同列上的单范围
                 rng_col = None; min_v = None; max_v = None; inc_min = True; inc_max = True
                 for cond in filter_conditions:
                     col = cond.get("column"); op = (cond.get("op") or "").strip(); val = str(cond.get("value"))
