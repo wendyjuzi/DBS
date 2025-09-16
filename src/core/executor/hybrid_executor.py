@@ -78,6 +78,8 @@ class HybridExecutionEngine:
                 res = self._execute_delete(plan)
             elif t in ["DROP_TABLE", "DropTable"]:
                 res = self._execute_drop_table(plan)
+            elif t in ["Aggregate"]:
+                res = self._execute_aggregate(plan)
             else:
                 raise ExecutionError(f"不支持的查询计划类型: {t}")
             res["execution_time"] = time.time() - start_time
@@ -1454,3 +1456,107 @@ class HybridExecutionEngine:
         else:
             print(f"❌ 不支持的导出格式: {format_type}")
             return False
+
+    def _execute_aggregate(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """执行聚合查询（无GROUP BY）"""
+        print(f"[EXEC] AGGREGATE {plan}")
+        
+        # 从children中获取表名
+        children = plan.get("children", [])
+        if not children:
+            raise ExecutionError("聚合查询缺少子计划")
+        
+        # 第一个child应该是SeqScan
+        seqscan_plan = children[0]
+        if seqscan_plan.get("type") != "SeqScan":
+            raise ExecutionError("聚合查询的子计划必须是SeqScan")
+        
+        table_name = seqscan_plan.get("props", {}).get("table", "")
+        if not table_name:
+            raise ExecutionError("聚合查询缺少表名")
+        
+        # 获取聚合函数
+        functions = plan.get("props", {}).get("functions", [])
+        if not functions:
+            raise ExecutionError("聚合查询缺少聚合函数")
+        
+        # 确保表结构已缓存
+        if table_name not in self.table_columns:
+            self._ensure_table_cached(table_name)
+        if table_name not in self.table_columns:
+            raise CatalogError(f"表 '{table_name}' 不存在")
+        
+        try:
+            # 获取所有数据
+            all_rows = self.executor.seq_scan(table_name)
+            filtered_rows = [row for row in all_rows if not row.get_is_deleted()]
+            
+            print(f"[EXEC] 聚合查询扫描到 {len(filtered_rows)} 行数据")
+            
+            # 计算聚合函数
+            result_row = []
+            result_columns = []
+            
+            for func in functions:
+                func_name = func.get("function", "")
+                func_column = func.get("column", "")
+                
+                if func_name == "COUNT" and func_column == "*":
+                    agg_value = len(filtered_rows)
+                    result_columns.append("COUNT(*)")
+                elif func_name == "AVG":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = sum(values) / len(values) if values else 0
+                        result_columns.append(f"AVG({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"AVG({func_column})")
+                elif func_name == "MAX":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = max(values) if values else 0
+                        result_columns.append(f"MAX({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"MAX({func_column})")
+                elif func_name == "MIN":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = min(values) if values else 0
+                        result_columns.append(f"MIN({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"MIN({func_column})")
+                elif func_name == "SUM":
+                    if func_column in self.table_columns[table_name]:
+                        col_idx = self.table_columns[table_name].index(func_column)
+                        values = [float(row.get_values()[col_idx]) for row in filtered_rows]
+                        agg_value = sum(values)
+                        result_columns.append(f"SUM({func_column})")
+                    else:
+                        agg_value = 0
+                        result_columns.append(f"SUM({func_column})")
+                else:
+                    agg_value = 0
+                    result_columns.append(f"{func_name}({func_column})")
+                
+                result_row.append(str(agg_value))
+            
+            return {
+                "affected_rows": 1,
+                "data": [result_row],
+                "metadata": {
+                    "message": f"聚合查询返回 1 行",
+                    "columns": result_columns
+                }
+            }
+            
+        except Exception as e:
+            print(f"[EXEC] 聚合查询失败: {e}")
+            import traceback
+            print(f"[EXEC] 详细错误信息: {traceback.format_exc()}")
+            raise ExecutionError(f"聚合查询执行失败: {str(e)}")

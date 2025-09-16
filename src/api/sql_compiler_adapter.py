@@ -44,6 +44,11 @@ class SQLCompilerAdapter:
         self.autocommit: bool = True
         self._txn_insert_buffer: Dict[str, List[List[str]]] = {}
         
+        # 性能优化：缓存机制
+        self._catalog_cache = {}  # 缓存目录信息
+        self._last_sync_time = 0  # 上次同步时间
+        self._sync_interval = 5.0  # 同步间隔（秒）
+        
         # 初始化存储/执行引擎
         if use_hybrid_storage and HYBRID_ENGINE_AVAILABLE:
             try:
@@ -104,6 +109,8 @@ class SQLCompilerAdapter:
     def sync_catalog(self) -> bool:
         """从底层存储同步编译器目录，供GUI/外部主动刷新使用。"""
         try:
+            # 强制刷新，忽略缓存
+            self._last_sync_time = 0
             self._sync_compiler_catalog_from_storage()
             return True
         except Exception:
@@ -1175,6 +1182,17 @@ class SQLCompilerAdapter:
 
     def _sync_compiler_catalog_from_storage(self) -> None:
         """将底层存储中的表结构同步到编译器目录中，避免语义阶段报表不存在。"""
+        import time
+        
+        # 性能优化：检查是否需要同步
+        current_time = time.time()
+        if (current_time - self._last_sync_time) < self._sync_interval and self._catalog_cache:
+            # 使用缓存，避免重复的C++模块访问
+            for table_name, table_info in self._catalog_cache.items():
+                if table_name not in self.catalog.tables:
+                    self.catalog.tables[table_name] = table_info
+            return
+        
         try:
             # 获取表名
             if hasattr(self.storage_engine, 'get_table_names'):
@@ -1264,10 +1282,15 @@ class SQLCompilerAdapter:
                 try:
                     if not (hasattr(self.catalog, 'has_table') and self.catalog.has_table(tu)):
                         self.catalog.create_table(tu, col_map)
+                    # 更新缓存
+                    self._catalog_cache[tu] = col_map
                 except Exception:
                     pass
             except Exception:
                 continue
+        
+        # 更新同步时间
+        self._last_sync_time = current_time
 
     def _handle_create_index(self, sql: str) -> Dict[str, Any]:
         # 语法（增强版）：

@@ -728,3 +728,14 @@
 {"txid": "64ab7c33-d330-4493-b71e-a4f03f57e051", "op": "BEGIN", "table": null, "payload": {}}
 {"txid": "64ab7c33-d330-4493-b71e-a4f03f57e051", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["4", "David", "22", "88.0"]}}
 {"txid": "64ab7c33-d330-4493-b71e-a4f03f57e051", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "6a8e0676-2083-49c6-ac63-1bd3ceb4fb91", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "6a8e0676-2083-49c6-ac63-1bd3ceb4fb91", "op": "INSERT", "table": "TEST_PERF", "payload": {"values": ["1", "test1", "10.5"]}}
+{"txid": "6a8e0676-2083-49c6-ac63-1bd3ceb4fb91", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "44515c99-4fa9-43da-b994-6d66a0dd80ff", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "44515c99-4fa9-43da-b994-6d66a0dd80ff", "op": "INSERT", "table": "TEST_PERF", "payload": {"values": ["2", "test2", "20.5"]}}
+{"txid": "44515c99-4fa9-43da-b994-6d66a0dd80ff", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "acacb0fc-5157-445a-8629-bd71e32ab5cb", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "acacb0fc-5157-445a-8629-bd71e32ab5cb", "op": "UPDATE", "table": "TEST_PERF", "payload": {"set": [["VALUE", "15.0"]], "where": [{"column": "ID", "op": "=", "value": "1"}]}}
+{"txid": "acacb0fc-5157-445a-8629-bd71e32ab5cb", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "c6978e88-36d7-47cb-979d-13c1a9eb79b2", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "c6978e88-36d7-47cb-979d-13c1a9eb79b2", "op": "COMMIT", "table": null, "payload": {}}
