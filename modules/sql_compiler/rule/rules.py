@@ -23,7 +23,7 @@ KEYWORDS = {
     # 逻辑操作符
     "AND", "OR", "NOT",
     # 范围查询
-    "BETWEEN", "IN", "LIKE",
+    "BETWEEN", "IN", "LIKE", "IS",
     # 聚合函数
     "COUNT", "SUM", "AVG", "MAX", "MIN",
     # SHOW 语句

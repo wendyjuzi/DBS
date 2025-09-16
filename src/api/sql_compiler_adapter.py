@@ -121,7 +121,11 @@ class SQLCompilerAdapter:
         将SQL编译器的计划格式转换为执行器期望的格式
         不修改编译器，只做格式转换
         """
-        plan_dict = compiler_plan.to_dict()
+        # 处理字典和对象两种情况
+        if isinstance(compiler_plan, dict):
+            plan_dict = compiler_plan
+        else:
+            plan_dict = compiler_plan.to_dict()
         plan_type = plan_dict.get("type")
         
         print(f"[ADAPTER] 转换计划类型: {plan_type}")
@@ -158,15 +162,18 @@ class SQLCompilerAdapter:
             columns = []
             conditions = []
             joins = []
+            all_tables = []
             group_by = []
             order_by = []
             
             # 递归查找表名和条件
             def find_table_info(node):
-                nonlocal table_name, conditions, joins, group_by, order_by
+                nonlocal table_name, conditions, joins, group_by, order_by, all_tables
                 
                 if node.get("type") == "SeqScan":
                     table_name = node.get("props", {}).get("table", "")
+                    if table_name and table_name not in all_tables:
+                        all_tables.append(table_name)
                     # 提取WHERE条件
                     seq_scan_props = node.get("props", {})
                     if "conditions" in seq_scan_props:
@@ -174,11 +181,32 @@ class SQLCompilerAdapter:
                     elif "condition" in seq_scan_props:
                         # 单个条件转换为列表
                         conditions = [seq_scan_props["condition"]]
-                elif node.get("type") in ["InnerJoin", "LeftJoin", "RightJoin"]:
+                elif str(node.get("type", "")).lower().endswith("join"):
+                    # 提取Join右侧表名：通常为第二个child子树中的SeqScan表
+                    right_table = ""
+                    ch = node.get("children", [])
+                    if ch:
+                        # 假设右子树为 children[-1]
+                        def _find_first_seqscan(tbl_node):
+                            if not isinstance(tbl_node, dict):
+                                return ""
+                            if tbl_node.get("type") == "SeqScan":
+                                return tbl_node.get("props", {}).get("table", "")
+                            for _c in tbl_node.get("children", []) or []:
+                                t = _find_first_seqscan(_c)
+                                if t:
+                                    return t
+                            return ""
+                        right_table = _find_first_seqscan(ch[-1]) or node.get("props", {}).get("right_table", "")
+                    if right_table and right_table not in all_tables:
+                        all_tables.append(right_table)
+                    jtype = str(node.get("type") or "InnerJoin")
+                    if jtype.lower().endswith("join"):
+                        jtype = jtype[: -4]  # strip 'Join'
                     join_info = {
-                        "type": node.get("type", "InnerJoin"),
-                        "table": node.get("props", {}).get("right_table", ""),
-                        "on": node.get("props", {}).get("condition", "")
+                        "type": jtype.upper(),
+                        "right_table": right_table,
+                        "on": node.get("props", {}).get("condition", {})
                     }
                     joins.append(join_info)
                 elif node.get("type") == "GroupBy":
@@ -219,6 +247,8 @@ class SQLCompilerAdapter:
             # 添加高级功能信息
             if joins:
                 result["joins"] = joins
+            if all_tables:
+                result["tables"] = [t.upper() for t in all_tables]
             if group_by:
                 result["group_by"] = group_by
             if order_by:
@@ -266,10 +296,22 @@ class SQLCompilerAdapter:
         
         elif plan_type == "Delete":
             # 转换DELETE计划
+            table_name = plan_dict["props"]["table"].upper()
+            where_clause = []
+            
+            # 从children中提取WHERE条件
+            children = plan_dict.get("children", [])
+            for child in children:
+                if child.get("type") == "SeqScan":
+                    conditions = child.get("props", {}).get("conditions", [])
+                    if conditions:
+                        where_clause = conditions
+                        break
+            
             return {
                 "type": "DELETE",
-                "table": plan_dict["props"]["table"].upper(),
-                "where_clause": plan_dict["props"].get("where_clause", {})
+                "table": table_name,
+                "where_clause": where_clause
             }
         
         elif plan_type == "DropTable":
@@ -293,22 +335,53 @@ class SQLCompilerAdapter:
             }
         
         elif plan_type == "GroupBy":
-            # 转换GROUP BY计划
+            # 转换GROUP BY计划（支持先JOIN后聚合）
             table_name = ""
             group_columns = []
             aggregates = []
             select_columns = []
+            all_tables = []
+            joins = []
             
-            # 从GroupBy的props获取分组列
             group_columns = plan_dict["props"].get("columns", [])
             
-            # 从children中获取表名和聚合函数
+            def _collect_tables_and_joins(node):
+                nonlocal all_tables, joins
+                ntype = node.get("type")
+                if ntype == "SeqScan":
+                    t = node.get("props", {}).get("table", "")
+                    if t and t not in all_tables:
+                        all_tables.append(t)
+                elif str(ntype or "").lower().endswith("join"):
+                    right_table = ""
+                    def _first_seq(n):
+                        if not isinstance(n, dict):
+                            return ""
+                        if n.get("type") == "SeqScan":
+                            return n.get("props", {}).get("table", "")
+                        for ch in n.get("children", []) or []:
+                            t = _first_seq(ch)
+                            if t:
+                                return t
+                        return ""
+                    ch = node.get("children", [])
+                    if ch:
+                        right_table = _first_seq(ch[-1])
+                    jtype = str(ntype)
+                    if jtype.lower().endswith("join"):
+                        jtype = jtype[: -4]
+                    joins.append({
+                        "type": jtype.upper(),
+                        "right_table": right_table,
+                        "on": node.get("props", {}).get("condition", {})
+                    })
+                for ch in node.get("children", []) or []:
+                    _collect_tables_and_joins(ch)
+
             children = plan_dict.get("children", [])
-            if children and len(children) > 0:
-                # 第一个child是Aggregate
+            if children:
                 aggregate_child = children[0]
                 if aggregate_child.get("type") == "Aggregate":
-                    # 从Aggregate的functions获取聚合信息
                     functions = aggregate_child.get("props", {}).get("functions", [])
                     for func in functions:
                         func_name = func.get("function", "")
@@ -319,37 +392,45 @@ class SQLCompilerAdapter:
                         elif func_name in ["AVG", "SUM", "MAX", "MIN"]:
                             aggregates.append({"function": func_name, "column": func_column})
                             select_columns.append(f"{func_name}({func_column})")
-                    
-                    # 从Aggregate的children获取表名
-                    agg_children = aggregate_child.get("children", [])
-                    if agg_children and len(agg_children) > 0:
-                        seqscan_child = agg_children[0]
-                        if seqscan_child.get("type") == "SeqScan":
-                            table_name = seqscan_child.get("props", {}).get("table", "")
-            
-            # 添加分组列到select_columns
+                    _collect_tables_and_joins(aggregate_child)
+                    if all_tables:
+                        table_name = all_tables[0]
+
             for col in group_columns:
                 if col not in select_columns:
                     select_columns.append(col)
-            
-            return {
+            out = {
                 "type": "SELECT",
-                "table": table_name.upper() if table_name else "",
+                "table": table_name.upper() if table_name else table_name,
                 "columns": select_columns,
                 "group_by": {
                     "group_columns": group_columns,
                     "aggregates": aggregates
                 }
             }
+            if all_tables:
+                out["tables"] = [t.upper() for t in all_tables]
+            if joins:
+                out["joins"] = joins
+            return out
         
         elif plan_type == "Sort":
-            # 转换ORDER BY计划
-            return {
-                "type": "SELECT",
-                "table": plan_dict["props"].get("table", ""),
-                "columns": plan_dict["props"].get("columns", []),
-                "order_by": plan_dict["props"].get("order_columns", [])
-            }
+            # 转换ORDER BY计划 - 需要递归处理子计划
+            children = plan_dict.get("children", [])
+            if children:
+                # 递归转换子计划
+                child_plan = self._convert_plan_to_executor_format(children[0])
+                # 添加ORDER BY信息
+                child_plan["order_by"] = plan_dict["props"].get("columns", [])
+                return child_plan
+            else:
+                # 没有子计划，返回基本格式
+                return {
+                    "type": "SELECT",
+                    "table": plan_dict["props"].get("table", ""),
+                    "columns": plan_dict["props"].get("columns", []),
+                    "order_by": plan_dict["props"].get("columns", [])
+                }
         
         else:
             # 未知类型，直接返回原始格式
