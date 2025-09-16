@@ -754,8 +754,16 @@ SELECT id, name, score FROM students WHERE age > 18;"""
         # 分布式菜单（演示）
         menu_dist = tk.Menu(menubar, tearoff=0)
         menu_dist.add_command(label="初始化分布式", command=self.init_distributed_demo)
+        menu_dist.add_command(label="初始化分布式(范围分片)", command=self.init_distributed_range_demo)
         menu_dist.add_command(label="分布式查询(合并)", command=self.run_distributed_select)
         menu_dist.add_command(label="分布式SUM(id)", command=self.run_distributed_sum)
+        menu_dist.add_separator()
+        menu_dist.add_command(label="向分布式T插入一行", command=self.dist_insert_dialog)
+        menu_dist.add_command(label="分布式自定义查询", command=self.dist_custom_select)
+        menu_dist.add_command(label="路由测试(key→分片)", command=self.route_test_dialog)
+        menu_dist.add_separator()
+        menu_dist.add_command(label="显示分片热力图", command=self.show_shard_heatmap)
+        menu_dist.add_command(label="显示并行时间线", command=self.show_timeline)
         menu_dist.add_command(label="查看慢日志", command=self.show_slowlog)
         menubar.add_cascade(label="分布式", menu=menu_dist)
 
@@ -819,6 +827,40 @@ SELECT id, name, score FROM students WHERE age > 18;"""
         except Exception as e:
             self.log(f"分布式初始化失败: {e}")
 
+    def init_distributed_range_demo(self):
+        """初始化分布式演示：范围分片 [0,5), [5,~)。"""
+        try:
+            self.log("初始化分布式(范围分片)演示环境...")
+            self.dist_meta = ShardMetadata()
+            # 定义两个范围分片：字符串比较，id 转为零填充或直接字符串比较足够演示
+            self.dist_meta.create_range_shards('T', [("0", "5"), ("5", None)])
+            self.dist_router = ShardRouter(self.dist_meta)
+            from src.distributed.monitoring import SlowQueryLog
+            slowlog = SlowQueryLog(threshold_ms=0)
+            node_a = RemoteNode(DatabaseAPI(), name="gui_node_r1", slowlog=slowlog)
+            node_b = RemoteNode(DatabaseAPI(), name="gui_node_r2", slowlog=slowlog)
+            shards = self.dist_router.all_shards('T')
+            if len(shards) >= 2:
+                self.dist_nodes[shards[0]['id']] = node_a
+                self.dist_nodes[shards[1]['id']] = node_b
+            elif len(shards) == 1:
+                self.dist_nodes[shards[0]['id']] = node_a
+            # 在每个分片建表
+            for s in self.dist_router.all_shards('T'):
+                n = self.dist_nodes.get(s['id']) or node_a
+                n.execute("DROP TABLE T;")
+                n.execute("CREATE TABLE T(id INT, name STRING);")
+            self.dist_exec = DistributedExecutor(self.dist_router, {'T': 'id'}, self.dist_nodes, slowlog=slowlog)
+            self._dist_slowlog = slowlog
+            # 插入几行示例：落到不同范围
+            self.dist_insert_row(1, 'A')
+            self.dist_insert_row(4, 'B')
+            self.dist_insert_row(5, 'C')
+            self.dist_insert_row(12, 'D')
+            self.log("✓ 分布式演示环境就绪 (表T, 范围分片[0,5),[5,~))")
+        except Exception as e:
+            self.log(f"分布式(范围)初始化失败: {e}")
+
     def dist_insert_row(self, id_val: int, name: str):
         if not (self.dist_router and self.dist_nodes):
             return
@@ -827,6 +869,143 @@ SELECT id, name, score FROM students WHERE age > 18;"""
             return
         node = self.dist_nodes.get(s[0]['id']) or next(iter(self.dist_nodes.values()))
         node.execute(f"INSERT INTO T(id,name) VALUES ({id_val}, '{name}');")
+
+    def dist_insert_dialog(self):
+        """弹窗输入一行数据并按分片规则插入到表 T。"""
+        if not self.dist_exec:
+            self.log("请先初始化分布式")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("向分布式表 T 插入一行")
+        ttk.Label(win, text="id (分片键)").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
+        id_var = tk.StringVar()
+        ttk.Entry(win, textvariable=id_var, width=20).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(win, text="name").grid(row=1, column=0, padx=6, pady=6, sticky=tk.W)
+        name_var = tk.StringVar()
+        ttk.Entry(win, textvariable=name_var, width=20).grid(row=1, column=1, padx=6, pady=6)
+        def do_insert():
+            try:
+                iv = int(id_var.get().strip())
+                nm = name_var.get().strip()
+                if nm == "":
+                    messagebox.showwarning("警告", "请填写 name")
+                    return
+                self.dist_insert_row(iv, nm)
+                self.result_text.insert(tk.END, f"已插入到分布式表 T: id={iv}, name={nm}\n")
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("错误", f"插入失败: {e}")
+        ttk.Button(win, text="插入", command=do_insert).grid(row=2, column=1, padx=6, pady=12, sticky=tk.W)
+
+    def dist_custom_select(self):
+        """跨分片执行自定义 SELECT 并合并显示。使用 {table} 作为表占位符，默认 T。"""
+        if not self.dist_exec:
+            self.log("请先初始化分布式")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("分布式自定义查询")
+        ttk.Label(win, text="SELECT 模板 (使用 {table} 占位)").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
+        sql_text = scrolledtext.ScrolledText(win, height=5, width=60)
+        sql_text.grid(row=1, column=0, columnspan=2, padx=6, pady=6)
+        sql_text.insert(tk.END, "SELECT id,name FROM {table};")
+        ttk.Label(win, text="表名").grid(row=2, column=0, padx=6, pady=6, sticky=tk.W)
+        tbl_var = tk.StringVar(value="T")
+        ttk.Entry(win, textvariable=tbl_var, width=20).grid(row=2, column=1, padx=6, pady=6, sticky=tk.W)
+        def do_run():
+            tmpl = sql_text.get(1.0, tk.END).strip()
+            table = tbl_var.get().strip() or "T"
+            if "{table}" not in tmpl:
+                messagebox.showwarning("警告", "模板中缺少 {table} 占位符")
+                return
+            try:
+                # 复用分布式执行器的查询合并接口
+                res = self.dist_exec.select_all_shards(table, tmpl)
+                out = {"status":"success","data":res.get("data",[]),"metadata":{"columns":res.get("columns", ["col1","col2"])},"affected_rows":len(res.get("data",[]))}
+                self.display_result(out, 0.0)
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("错误", f"执行失败: {e}")
+        ttk.Button(win, text="执行", command=do_run).grid(row=3, column=1, padx=6, pady=12, sticky=tk.W)
+
+    def route_test_dialog(self):
+        """输入一个键值，展示路由到的分片与节点。"""
+        if not (self.dist_router and self.dist_nodes):
+            self.log("请先初始化分布式")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("路由测试 - key → 分片")
+        ttk.Label(win, text="表名").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
+        tbl_var = tk.StringVar(value="T")
+        ttk.Entry(win, textvariable=tbl_var, width=18).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(win, text="key(如 id)").grid(row=1, column=0, padx=6, pady=6, sticky=tk.W)
+        key_var = tk.StringVar()
+        ttk.Entry(win, textvariable=key_var, width=18).grid(row=1, column=1, padx=6, pady=6)
+        out_lbl = ttk.Label(win, text="")
+        out_lbl.grid(row=2, column=0, columnspan=2, padx=6, pady=6, sticky=tk.W)
+        def do_route():
+            k = key_var.get().strip()
+            table = tbl_var.get().strip() or 'T'
+            if k == "":
+                out_lbl.config(text="请输入 key")
+                return
+            shards = self.dist_router.locate_by_value(table, k)
+            if not shards:
+                out_lbl.config(text="未命中任何分片")
+                return
+            sid = shards[0].get('id')
+            node = self.dist_nodes.get(sid)
+            out_lbl.config(text=f"strategy={self.dist_meta.get(table).get('strategy')} → shard={sid} → node={getattr(node,'name','(unknown)')}")
+        ttk.Button(win, text="测试路由", command=do_route).grid(row=3, column=1, padx=6, pady=8, sticky=tk.W)
+
+    def show_shard_heatmap(self):
+        """基于每片当前行数绘制简易热力图。"""
+        try:
+            if not (self.dist_router and self.dist_nodes):
+                self.log("请先初始化分布式")
+                return
+            self.result_text.insert(tk.END, "分片热力图 (表T)\n")
+            shards = self.dist_router.all_shards('T')
+            max_rows = 1
+            rows_per = {}
+            for s in shards:
+                sid = s.get('id')
+                node = self.dist_nodes.get(sid) or next(iter(self.dist_nodes.values()))
+                res = node.execute('SELECT id,name FROM T;')
+                n = len((res or {}).get('data', [])) if isinstance(res, dict) else 0
+                rows_per[sid] = n
+                max_rows = max(max_rows, n)
+            for sid, n in rows_per.items():
+                bar_len = int((n / max_rows) * 20) if max_rows else 0
+                bar = '█' * max(1, bar_len)
+                self.result_text.insert(tk.END, f"- {sid:<10} rows={n:<4} {bar}\n")
+            self.result_text.insert(tk.END, "\n")
+        except Exception as e:
+            self.log(f"热力图失败: {e}")
+
+    def show_timeline(self):
+        """基于慢日志绘制简易并行时间线。"""
+        try:
+            if not hasattr(self, '_dist_slowlog'):
+                self.log("慢日志为空或未初始化")
+                return
+            logs = self._dist_slowlog.list()
+            if not logs:
+                self.result_text.insert(tk.END, "无慢查询记录\n")
+                return
+            self.result_text.insert(tk.END, "并行时间线 (ms，条长≈耗时)\n")
+            # 取最近 20 条
+            items = sorted(logs, key=lambda x: x.get('ts', 0), reverse=True)[:20]
+            max_ms = max(1.0, max(x.get('elapsed_ms', 0.0) for x in items))
+            for it in items:
+                node = it.get('node', 'node')
+                ms = float(it.get('elapsed_ms', 0.0))
+                bar_len = int((ms / max_ms) * 30)
+                bar = '▮' * max(1, bar_len)
+                sql = it.get('sql', '').replace('\n', ' ')
+                self.result_text.insert(tk.END, f"{node:<14} {ms:>6.1f}ms {bar}  {sql[:60]}\n")
+            self.result_text.insert(tk.END, "\n")
+        except Exception as e:
+            self.log(f"时间线失败: {e}")
 
     def run_distributed_select(self):
         """分布式合并查询"""
