@@ -148,11 +148,11 @@ class BufferPool:
             self._lru_order[key] = None
             self._lru_order.move_to_end(key)
         elif self.strategy == "FIFO":
-            self._fifo_queue.append(key)
+            self._fifo_queue.append(key)  # 新页面添加到队列末尾
         elif self.strategy == "CLOCK":
             clock_entry = ClockEntry(page)
             self._clock_entries[key] = clock_entry
-            self._clock_hand.append(key)
+            self._clock_hand.append(key)  # 新页面添加到时钟指针末尾
 
     # buffer_pool.py 修改 _evict_page 方法
     def _evict_page(self):
@@ -199,13 +199,14 @@ class BufferPool:
 
     def _evict_clock_page(self) -> Tuple[str, int]:
         """Clock 算法淘汰页面"""
-        while True:
-            if not self._clock_hand:
-                # 如果没有页面，应该不会发生，但安全起见
-                return next(iter(self.cache.keys()))
+        if not self._clock_hand:
+            # 如果没有页面，应该不会发生，但安全起见
+            return next(iter(self.cache.keys()))
 
+        # 遍历时钟指针，寻找引用位为0的页面
+        while True:
             key = self._clock_hand[0]
-            self._clock_hand.rotate(-1)  # 移动指针
+            self._clock_hand.rotate(-1)  # 移动指针到下一个
 
             if key not in self._clock_entries:
                 continue

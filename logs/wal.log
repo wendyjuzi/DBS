@@ -952,3 +952,37 @@
 {"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "3"}}
 {"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "DELETE", "table": "STUDENTS", "payload": {"pk": "4"}}
 {"txid": "bcefe831-d85f-493c-9366-61e4f872d05e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "4449881a-a165-4691-8364-9d6699ba6993", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "4449881a-a165-4691-8364-9d6699ba6993", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["6", "Alice", "20", "85.5"]}}
+{"txid": "4449881a-a165-4691-8364-9d6699ba6993", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "1a840cfa-a636-4b8c-811c-c57274f499be", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1a840cfa-a636-4b8c-811c-c57274f499be", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "85.5"]}}
+{"txid": "1a840cfa-a636-4b8c-811c-c57274f499be", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9ae631a7-1c45-4041-876c-add4e685457c", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9ae631a7-1c45-4041-876c-add4e685457c", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "85.5"]}}
+{"txid": "9ae631a7-1c45-4041-876c-add4e685457c", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "9bfd1507-e25a-4aae-956b-e7bb3f4abe1b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "9bfd1507-e25a-4aae-956b-e7bb3f4abe1b", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["2", "Bob", "21", "92.0"]}}
+{"txid": "9bfd1507-e25a-4aae-956b-e7bb3f4abe1b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "1e30745b-afaf-40c8-9012-d54d6e4cca23", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "1e30745b-afaf-40c8-9012-d54d6e4cca23", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Charlie", "19", "78.5"]}}
+{"txid": "1e30745b-afaf-40c8-9012-d54d6e4cca23", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "a105df39-c202-4c95-988b-acbbbd38042a", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "a105df39-c202-4c95-988b-acbbbd38042a", "op": "UPDATE", "table": "STUDENTS", "payload": {"set": [["SCORE", "95.0"]], "where": [{"column": "ID", "op": "=", "value": "1"}]}}
+{"txid": "a105df39-c202-4c95-988b-acbbbd38042a", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "19756fb8-884f-4204-845f-664161c1810e", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "19756fb8-884f-4204-845f-664161c1810e", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "2fd2409c-3e6e-48af-a419-62178457f59b", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "2fd2409c-3e6e-48af-a419-62178457f59b", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["1", "Alice", "20", "85.5"]}}
+{"txid": "2fd2409c-3e6e-48af-a419-62178457f59b", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "a4a81d78-9889-4329-9461-7d5600b6090f", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "a4a81d78-9889-4329-9461-7d5600b6090f", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["2", "Bob", "21", "92.0"]}}
+{"txid": "a4a81d78-9889-4329-9461-7d5600b6090f", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "06281735-c754-46e3-9128-76c3cd817bee", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "06281735-c754-46e3-9128-76c3cd817bee", "op": "INSERT", "table": "STUDENTS", "payload": {"values": ["3", "Charlie", "19", "78.5"]}}
+{"txid": "06281735-c754-46e3-9128-76c3cd817bee", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "b7896934-c109-4deb-bbb6-b6afce39a508", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "b7896934-c109-4deb-bbb6-b6afce39a508", "op": "UPDATE", "table": "STUDENTS", "payload": {"set": [["SCORE", "95.0"]], "where": [{"column": "ID", "op": "=", "value": "1"}]}}
+{"txid": "b7896934-c109-4deb-bbb6-b6afce39a508", "op": "COMMIT", "table": null, "payload": {}}
+{"txid": "2a7fbd3e-f931-4f77-bd6d-f03cb8412885", "op": "BEGIN", "table": null, "payload": {}}
+{"txid": "2a7fbd3e-f931-4f77-bd6d-f03cb8412885", "op": "COMMIT", "table": null, "payload": {}}
