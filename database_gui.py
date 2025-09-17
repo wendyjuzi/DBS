@@ -730,7 +730,8 @@ SELECT id, name, score FROM students WHERE age > 18;"""
 
         # 数据菜单（导入/导出表）
         menu_data = tk.Menu(menubar, tearoff=0)
-        menu_data.add_command(label="导入表...", command=self.import_table_dialog)
+        
+        menu_data.add_command(label="导入表...", command=self.fast_bulk_import_dialog)
         menu_data.add_command(label="导出表...", command=self.export_table_dialog)
         menubar.add_cascade(label="数据", menu=menu_data)
 
@@ -3011,6 +3012,146 @@ DELETE FROM students WHERE id = 3;
             self._exec_and_display(sql)
             win.destroy()
         ttk.Button(win, text="导入", command=do_import).grid(row=3, column=1, padx=6, pady=12, sticky=tk.W)
+
+    def fast_bulk_import_dialog(self):
+        """快速批量导入对话框"""
+        win = tk.Toplevel(self.root)
+        win.title("快速批量导入")
+        win.geometry("500x400")
+        
+        # 表名
+        ttk.Label(win, text="表名:").grid(row=0, column=0, padx=6, pady=6, sticky=tk.W)
+        table_var = tk.StringVar()
+        ttk.Entry(win, textvariable=table_var, width=30).grid(row=0, column=1, padx=6, pady=6, columnspan=2)
+        
+        # 格式
+        ttk.Label(win, text="格式:").grid(row=1, column=0, padx=6, pady=6, sticky=tk.W)
+        fmt_var = tk.StringVar(value="csv")
+        ttk.Combobox(win, textvariable=fmt_var, values=["csv", "json"], state="readonly", width=10).grid(row=1, column=1, padx=6, pady=6, sticky=tk.W)
+        
+        # 文件路径
+        ttk.Label(win, text="文件路径:").grid(row=2, column=0, padx=6, pady=6, sticky=tk.W)
+        path_var = tk.StringVar()
+        ttk.Entry(win, textvariable=path_var, width=30).grid(row=2, column=1, padx=6, pady=6)
+        
+        def choose_file():
+            fname = filedialog.askopenfilename(filetypes=[("CSV","*.csv"),("JSON","*.json"),("所有文件","*.*")])
+            if fname:
+                path_var.set(fname)
+        ttk.Button(win, text="选择...", command=choose_file).grid(row=2, column=2, padx=6, pady=6)
+        
+        # 导入模式选择
+        ttk.Label(win, text="导入模式:").grid(row=3, column=0, padx=6, pady=6, sticky=tk.W)
+        mode_var = tk.StringVar(value="lightning")
+        mode_frame = tk.Frame(win)
+        mode_frame.grid(row=3, column=1, columnspan=2, padx=6, pady=6, sticky=tk.W)
+        ttk.Radiobutton(mode_frame, text="⚡ 闪电级导入", variable=mode_var, value="lightning").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(mode_frame, text="🚀 快速批量导入", variable=mode_var, value="fast").pack(side=tk.LEFT, padx=5)
+        
+        # 批量大小（仅快速批量导入模式显示）
+        batch_frame = tk.Frame(win)
+        batch_frame.grid(row=4, column=0, columnspan=3, padx=6, pady=6, sticky=tk.W)
+        ttk.Label(batch_frame, text="批量大小:").pack(side=tk.LEFT)
+        batch_size_var = tk.StringVar(value="5000")
+        ttk.Entry(batch_frame, textvariable=batch_size_var, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Label(batch_frame, text="行/批").pack(side=tk.LEFT)
+        
+        # 事务模式（仅快速批量导入模式显示）
+        txn_frame = tk.Frame(win)
+        txn_frame.grid(row=5, column=0, columnspan=3, padx=6, pady=6, sticky=tk.W)
+        use_transaction_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(txn_frame, text="使用事务（推荐）", variable=use_transaction_var).pack(side=tk.LEFT)
+        
+        # 进度显示区域
+        ttk.Label(win, text="导入进度:").grid(row=6, column=0, padx=6, pady=6, sticky=tk.W)
+        progress_text = tk.Text(win, height=8, width=50)
+        progress_text.grid(row=7, column=0, columnspan=3, padx=6, pady=6, sticky="nsew")
+        
+        # 滚动条
+        scrollbar = ttk.Scrollbar(win, orient="vertical", command=progress_text.yview)
+        scrollbar.grid(row=7, column=3, sticky="ns")
+        progress_text.configure(yscrollcommand=scrollbar.set)
+        
+        def update_mode_visibility():
+            """根据选择的模式显示/隐藏相关控件"""
+            if mode_var.get() == "lightning":
+                batch_frame.grid_remove()
+                txn_frame.grid_remove()
+            else:
+                batch_frame.grid()
+                txn_frame.grid()
+        
+        # 绑定模式变化事件
+        mode_var.trace('w', lambda *args: update_mode_visibility())
+        update_mode_visibility()  # 初始调用
+        
+        def do_fast_import():
+            table = table_var.get().strip()
+            fmt = fmt_var.get().strip().lower()
+            path = path_var.get().strip()
+            mode = mode_var.get()
+            
+            if not table or not path:
+                messagebox.showwarning("警告", "请填写表名与文件路径")
+                return
+            
+            # 清空进度显示
+            progress_text.delete(1.0, tk.END)
+            
+            if mode == "lightning":
+                progress_text.insert(tk.END, f"⚡ 启动闪电级导入模式\n")
+                progress_text.insert(tk.END, f"📊 目标表: {table}\n")
+                progress_text.insert(tk.END, f"📁 文件: {path}\n")
+                progress_text.insert(tk.END, "=" * 50 + "\n")
+            else:
+                batch_size = int(batch_size_var.get().strip() or "5000")
+                use_transaction = use_transaction_var.get()
+                progress_text.insert(tk.END, f"🚀 启动快速批量导入模式\n")
+                progress_text.insert(tk.END, f"📊 目标表: {table}\n")
+                progress_text.insert(tk.END, f"📁 文件: {path}\n")
+                progress_text.insert(tk.END, f"📦 批量大小: {batch_size}\n")
+                progress_text.insert(tk.END, f"🔄 事务模式: {'开启' if use_transaction else '关闭'}\n")
+                progress_text.insert(tk.END, "=" * 50 + "\n")
+            
+            win.update()
+            
+            try:
+                if mode == "lightning":
+                    # 调用闪电级导入
+                    result = self.adapter.lightning_fast_import(table, fmt, path)
+                else:
+                    # 调用快速批量导入
+                    batch_size = int(batch_size_var.get().strip() or "5000")
+                    use_transaction = use_transaction_var.get()
+                    result = self.adapter.fast_bulk_import(table, fmt, path, batch_size, use_transaction)
+                
+                if result.get("success", True):  # 默认成功
+                    mode_name = "闪电级导入" if mode == "lightning" else "快速批量导入"
+                    progress_text.insert(tk.END, f"✅ {mode_name}完成!\n")
+                    progress_text.insert(tk.END, f"📊 成功插入: {result.get('inserted_rows', 0)} 行\n")
+                    progress_text.insert(tk.END, f"⏱️  总耗时: {result.get('total_time', 0):.2f} 秒\n")
+                    progress_text.insert(tk.END, f"🚀 导入速度: {result.get('speed', 0):.0f} 行/秒\n")
+                    if result.get('failed_rows', 0) > 0:
+                        progress_text.insert(tk.END, f"⚠️  跳过: {result['failed_rows']} 行\n")
+                else:
+                    progress_text.insert(tk.END, f"❌ 导入失败: {result.get('error', '未知错误')}\n")
+                
+                progress_text.see(tk.END)
+                
+            except Exception as e:
+                progress_text.insert(tk.END, f"❌ 导入出错: {str(e)}\n")
+                progress_text.see(tk.END)
+        
+        # 按钮
+        button_frame = tk.Frame(win)
+        button_frame.grid(row=8, column=0, columnspan=3, pady=10)
+        ttk.Button(button_frame, text="开始导入", command=do_fast_import).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="关闭", command=win.destroy).pack(side=tk.LEFT, padx=5)
+        
+        # 配置网格权重
+        win.grid_rowconfigure(7, weight=1)
+        win.grid_columnconfigure(1, weight=1)
+
 
     def export_table_dialog(self):
         win = tk.Toplevel(self.root)

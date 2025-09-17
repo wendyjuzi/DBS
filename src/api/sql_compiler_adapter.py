@@ -2563,23 +2563,24 @@ class SQLCompilerAdapter:
             return False
 
     # 添加导入方法
-    def import_table(self, table_name: str, format_type: str, file_path: str) -> bool:
+    def import_table(self, table_name: str, format_type: str, file_path: str, batch_size: int = 5000) -> bool:
         """
-        从文件导入数据到表
+        从文件导入数据到表 - 支持批量导入优化
 
         Args:
             table_name: 表名
             format_type: 导入格式 (csv/json)
             file_path: 文件路径
+            batch_size: 批量大小，默认5000行
 
         Returns:
             bool: 导入是否成功
         """
         try:
             if format_type.lower() == 'csv':
-                return self._import_from_csv(table_name, file_path)
+                return self._import_from_csv(table_name, file_path, batch_size)
             elif format_type.lower() == 'json':
-                return self._import_from_json(table_name, file_path)
+                return self._import_from_json(table_name, file_path, batch_size)
             else:
                 print(f"❌ 不支持的导入格式: {format_type}")
                 return False
@@ -2587,16 +2588,703 @@ class SQLCompilerAdapter:
             print(f"❌ 导入失败: {str(e)}")
             return False
 
-    def _import_from_csv(self, table_name: str, file_path: str) -> bool:
-        """从CSV文件导入数据"""
+    def lightning_fast_import(self, table_name: str, format_type: str, file_path: str) -> Dict[str, Any]:
+        """
+        闪电级导入 - 直接使用C++引擎，绕过所有Python层开销
+        
+        Args:
+            table_name: 表名
+            format_type: 文件格式 (csv/json)
+            file_path: 文件路径
+            
+        Returns:
+            Dict: 导入结果统计
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            print(f"⚡ 启动闪电级导入模式")
+            print(f"📊 目标表: {table_name}")
+            print(f"📁 文件: {file_path}")
+            
+            if format_type.lower() == 'csv':
+                result = self._lightning_fast_import_csv(table_name, file_path)
+            elif format_type.lower() == 'json':
+                result = self._lightning_fast_import_json(table_name, file_path)
+            else:
+                return {"success": False, "error": f"不支持的格式: {format_type}"}
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            result.update({
+                "total_time": total_time,
+                "speed": result.get("inserted_rows", 0) / total_time if total_time > 0 else 0
+            })
+            
+            return result
+            
+        except Exception as e:
+            return {"success": False, "error": str(e), "total_time": time.time() - start_time}
+
+    def ultra_fast_import(self, table_name: str, format_type: str, file_path: str) -> Dict[str, Any]:
+        """
+        超高速导入 - 专为最大性能优化
+        
+        Args:
+            table_name: 表名
+            format_type: 文件格式 (csv/json)
+            file_path: 文件路径
+            
+        Returns:
+            Dict: 导入结果统计
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            print(f"🚀 启动超高速导入模式")
+            print(f"📊 目标表: {table_name}")
+            print(f"📁 文件: {file_path}")
+            
+            if format_type.lower() == 'csv':
+                result = self._ultra_fast_import_csv(table_name, file_path)
+            elif format_type.lower() == 'json':
+                result = self._ultra_fast_import_json(table_name, file_path)
+            else:
+                return {"success": False, "error": f"不支持的格式: {format_type}"}
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            result.update({
+                "total_time": total_time,
+                "speed": result.get("inserted_rows", 0) / total_time if total_time > 0 else 0
+            })
+            
+            return result
+            
+        except Exception as e:
+            return {"success": False, "error": str(e), "total_time": time.time() - start_time}
+
+    def fast_bulk_import(self, table_name: str, format_type: str, file_path: str, 
+                        batch_size: int = 5000, use_transaction: bool = True) -> Dict[str, Any]:
+        """
+        超快速批量导入 - 专为大数据量优化
+        
+        Args:
+            table_name: 表名
+            format_type: 文件格式 (csv/json)
+            file_path: 文件路径
+            batch_size: 批量大小，默认5000行
+            use_transaction: 是否使用事务，默认True
+            
+        Returns:
+            Dict: 导入结果统计
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            print(f"🚀 启动超快速批量导入模式")
+            print(f"📊 目标表: {table_name}")
+            print(f"📁 文件: {file_path}")
+            print(f"📦 批量大小: {batch_size}")
+            print(f"🔄 事务模式: {'开启' if use_transaction else '关闭'}")
+            
+            if format_type.lower() == 'csv':
+                result = self._fast_import_csv(table_name, file_path, batch_size, use_transaction)
+            elif format_type.lower() == 'json':
+                result = self._fast_import_json(table_name, file_path, batch_size, use_transaction)
+            else:
+                return {"success": False, "error": f"不支持的格式: {format_type}"}
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            result.update({
+                "total_time": total_time,
+                "speed": result.get("inserted_rows", 0) / total_time if total_time > 0 else 0
+            })
+            
+            return result
+            
+        except Exception as e:
+            return {"success": False, "error": str(e), "total_time": time.time() - start_time}
+
+    def _lightning_fast_import_csv(self, table_name: str, file_path: str) -> Dict[str, Any]:
+        """闪电级CSV导入 - 直接使用C++引擎，绕过所有Python开销"""
         try:
             import csv
             import os
+            
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"文件不存在: {file_path}"}
+            
+            # 读取CSV文件
+            with open(file_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                columns = next(reader)
+                data_rows = [row for row in reader if row]
+            
+            if not data_rows:
+                return {"success": True, "inserted_rows": 0, "failed_rows": 0}
+            
+            # 确保表存在 - 使用大写表名
+            table_name_upper = table_name.upper()
+            column_defs = []
+            for i, col in enumerate(columns):
+                sample_value = data_rows[0][i] if data_rows and i < len(data_rows[0]) else ""
+                col_type = self._infer_data_type(sample_value)
+                column_defs.append(f"{col} {col_type}")
+            
+            try:
+                create_sql = f"CREATE TABLE {table_name_upper} ({', '.join(column_defs)});"
+                self.execute(create_sql)
+                print(f"✅ 表 {table_name_upper} 创建成功")
+            except Exception as e:
+                print(f"✓ 表 {table_name_upper} 已存在: {e}")
+            
+            # 准备数据 - 过滤无效行
+            valid_rows = []
+            failed_rows = 0
+            for row in data_rows:
+                if len(row) == len(columns):
+                    valid_rows.append(row)
+                else:
+                    failed_rows += 1
+            
+            if not valid_rows:
+                return {"success": True, "inserted_rows": 0, "failed_rows": failed_rows}
+            
+            print(f"⚡ 准备直接调用C++批量插入: {len(valid_rows)} 行")
+            
+            # 直接调用C++引擎的insert_many方法
+            try:
+                # 确保表结构已缓存
+                self.hybrid_executor._ensure_table_cached(table_name_upper)
+                
+                # 直接调用C++执行引擎
+                inserted_count = self.hybrid_executor.executor.insert_many(table_name_upper, valid_rows)
+                total_inserted = int(inserted_count)
+                
+                print(f"⚡ C++批量插入完成: {total_inserted} 行")
+                
+                return {
+                    "success": True,
+                    "inserted_rows": total_inserted,
+                    "failed_rows": failed_rows
+                }
+                
+            except Exception as e:
+                print(f"⚠️  C++批量插入失败: {e}")
+                # 如果C++批量插入失败，回退到优化的逐行插入
+                return self._fallback_optimized_insert(table_name_upper, valid_rows, failed_rows)
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _lightning_fast_import_json(self, table_name: str, file_path: str) -> Dict[str, Any]:
+        """闪电级JSON导入 - 直接使用C++引擎，绕过所有Python开销"""
+        try:
+            import json
+            import os
+            
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"文件不存在: {file_path}"}
+            
+            # 读取JSON文件
+            with open(file_path, 'r', encoding='utf-8') as jsonfile:
+                data = json.load(jsonfile)
+            
+            if not data or not isinstance(data, list):
+                return {"success": False, "error": "JSON文件格式错误"}
+            
+            # 获取列名
+            first_row = data[0]
+            if not isinstance(first_row, dict):
+                return {"success": False, "error": "JSON数组元素应为对象"}
+            
+            columns = list(first_row.keys())
+            
+            # 确保表存在 - 使用大写表名
+            table_name_upper = table_name.upper()
+            column_defs = []
+            for col in columns:
+                sample_value = str(first_row.get(col, ""))
+                col_type = self._infer_data_type(sample_value)
+                column_defs.append(f"{col} {col_type}")
+            
+            try:
+                create_sql = f"CREATE TABLE {table_name_upper} ({', '.join(column_defs)});"
+                self.execute(create_sql)
+                print(f"✅ 表 {table_name_upper} 创建成功")
+            except Exception as e:
+                print(f"✓ 表 {table_name_upper} 已存在: {e}")
+            
+            # 准备数据
+            valid_rows = []
+            failed_rows = 0
+            for row in data:
+                if isinstance(row, dict):
+                    values = []
+                    for col in columns:
+                        value = row.get(col, "")
+                        values.append(str(value) if value is not None else "")
+                    valid_rows.append(values)
+                else:
+                    failed_rows += 1
+            
+            if not valid_rows:
+                return {"success": True, "inserted_rows": 0, "failed_rows": failed_rows}
+            
+            print(f"⚡ 准备直接调用C++批量插入: {len(valid_rows)} 行")
+            
+            # 直接调用C++引擎的insert_many方法
+            try:
+                # 确保表结构已缓存
+                self.hybrid_executor._ensure_table_cached(table_name_upper)
+                
+                # 直接调用C++执行引擎
+                inserted_count = self.hybrid_executor.executor.insert_many(table_name_upper, valid_rows)
+                total_inserted = int(inserted_count)
+                
+                print(f"⚡ C++批量插入完成: {total_inserted} 行")
+                
+                return {
+                    "success": True,
+                    "inserted_rows": total_inserted,
+                    "failed_rows": failed_rows
+                }
+                
+            except Exception as e:
+                print(f"⚠️  C++批量插入失败: {e}")
+                # 如果C++批量插入失败，回退到优化的逐行插入
+                return self._fallback_optimized_insert(table_name_upper, valid_rows, failed_rows)
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _fallback_optimized_insert(self, table_name: str, rows: list, failed_rows: int) -> Dict[str, Any]:
+        """回退优化插入 - 当C++批量插入失败时使用"""
+        try:
+            print(f"🔄 回退到优化逐行插入: {len(rows)} 行")
+            
+            # 使用事务缓冲，但优化批次大小
+            self._begin_transaction()
+            
+            total_inserted = 0
+            batch_size = 5000  # 使用较大的批次
+            
+            for batch_start in range(0, len(rows), batch_size):
+                batch_end = min(batch_start + batch_size, len(rows))
+                batch_data = rows[batch_start:batch_end]
+                
+                # 使用事务缓冲
+                for row in batch_data:
+                    try:
+                        values_str = ", ".join([f"'{v}'" for v in row])
+                        insert_sql = f"INSERT INTO {table_name} VALUES ({values_str});"
+                        result = self.execute(insert_sql)
+                        if result.get("status") != "error":
+                            total_inserted += 1
+                    except Exception:
+                        failed_rows += 1
+                
+                # 显示进度
+                progress = (batch_end / len(rows)) * 100
+                print(f"📈 进度: {progress:.1f}% ({batch_end}/{len(rows)} 行)")
+            
+            self._commit_transaction()
+            print(f"✅ 回退插入完成: {total_inserted} 行")
+            
+            return {
+                "success": True,
+                "inserted_rows": total_inserted,
+                "failed_rows": failed_rows
+            }
+            
+        except Exception as e:
+            try:
+                self._rollback_transaction()
+            except:
+                pass
+            return {"success": False, "error": str(e)}
+
+    def _ultra_fast_import_csv(self, table_name: str, file_path: str) -> Dict[str, Any]:
+        """超高速CSV导入 - 最大性能优化"""
+        try:
+            import csv
+            import os
+            
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"文件不存在: {file_path}"}
+            
+            # 读取CSV文件
+            with open(file_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                columns = next(reader)
+                data_rows = [row for row in reader if row]
+            
+            if not data_rows:
+                return {"success": True, "inserted_rows": 0, "failed_rows": 0}
+            
+            # 确保表存在
+            column_defs = []
+            for i, col in enumerate(columns):
+                sample_value = data_rows[0][i] if data_rows and i < len(data_rows[0]) else ""
+                col_type = self._infer_data_type(sample_value)
+                column_defs.append(f"{col} {col_type}")
+            
+            try:
+                create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)});"
+                self.execute(create_sql)
+            except Exception:
+                pass  # 表已存在
+            
+            # 使用事务缓冲模式，但优化批次大小
+            self._begin_transaction()
+            
+            total_inserted = 0
+            failed_rows = 0
+            
+            # 使用大批次进行事务缓冲
+            batch_size = 10000  # 使用更大的批次
+            print(f"🚀 超高速模式: {len(data_rows)} 行，批次大小: {batch_size}")
+            
+            for batch_start in range(0, len(data_rows), batch_size):
+                batch_end = min(batch_start + batch_size, len(data_rows))
+                batch_data = data_rows[batch_start:batch_end]
+                
+                # 使用事务缓冲
+                for row in batch_data:
+                    if len(row) == len(columns):
+                        try:
+                            values_str = ", ".join([f"'{v}'" for v in row])
+                            columns_str = ", ".join(columns)
+                            insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+                            result = self.execute(insert_sql)
+                            if result.get("status") != "error":
+                                total_inserted += 1
+                        except Exception:
+                            failed_rows += 1
+                    else:
+                        failed_rows += 1
+                
+                # 显示进度
+                progress = (batch_end / len(data_rows)) * 100
+                print(f"📈 进度: {progress:.1f}% ({batch_end}/{len(data_rows)} 行)")
+            
+            self._commit_transaction()
+            print(f"✅ 超高速导入完成: {total_inserted} 行")
+            
+            return {
+                "success": True,
+                "inserted_rows": total_inserted,
+                "failed_rows": failed_rows
+            }
+            
+        except Exception as e:
+            try:
+                self._rollback_transaction()
+            except:
+                pass
+            return {"success": False, "error": str(e)}
+
+    def _ultra_fast_import_json(self, table_name: str, file_path: str) -> Dict[str, Any]:
+        """超高速JSON导入 - 最大性能优化"""
+        try:
+            import json
+            import os
+            
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"文件不存在: {file_path}"}
+            
+            # 读取JSON文件
+            with open(file_path, 'r', encoding='utf-8') as jsonfile:
+                data = json.load(jsonfile)
+            
+            if not data or not isinstance(data, list):
+                return {"success": False, "error": "JSON文件格式错误"}
+            
+            # 获取列名
+            first_row = data[0]
+            if not isinstance(first_row, dict):
+                return {"success": False, "error": "JSON数组元素应为对象"}
+            
+            columns = list(first_row.keys())
+            
+            # 确保表存在
+            column_defs = []
+            for col in columns:
+                sample_value = str(first_row.get(col, ""))
+                col_type = self._infer_data_type(sample_value)
+                column_defs.append(f"{col} {col_type}")
+            
+            try:
+                create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)});"
+                self.execute(create_sql)
+            except Exception:
+                pass  # 表已存在
+            
+            # 使用事务缓冲模式，但优化批次大小
+            self._begin_transaction()
+            
+            total_inserted = 0
+            failed_rows = 0
+            
+            # 使用大批次进行事务缓冲
+            batch_size = 10000  # 使用更大的批次
+            print(f"🚀 超高速模式: {len(data)} 行，批次大小: {batch_size}")
+            
+            for batch_start in range(0, len(data), batch_size):
+                batch_end = min(batch_start + batch_size, len(data))
+                batch_data = data[batch_start:batch_end]
+                
+                # 使用事务缓冲
+                for row in batch_data:
+                    if isinstance(row, dict):
+                        try:
+                            values = []
+                            for col in columns:
+                                value = row.get(col, "")
+                                values.append(str(value) if value is not None else "")
+                            
+                            values_str = ", ".join([f"'{v}'" for v in values])
+                            columns_str = ", ".join(columns)
+                            insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+                            result = self.execute(insert_sql)
+                            if result.get("status") != "error":
+                                total_inserted += 1
+                        except Exception:
+                            failed_rows += 1
+                    else:
+                        failed_rows += 1
+                
+                # 显示进度
+                progress = (batch_end / len(data)) * 100
+                print(f"📈 进度: {progress:.1f}% ({batch_end}/{len(data)} 行)")
+            
+            self._commit_transaction()
+            print(f"✅ 超高速导入完成: {total_inserted} 行")
+            
+            return {
+                "success": True,
+                "inserted_rows": total_inserted,
+                "failed_rows": failed_rows
+            }
+            
+        except Exception as e:
+            try:
+                self._rollback_transaction()
+            except:
+                pass
+            return {"success": False, "error": str(e)}
+
+    def _fast_import_csv(self, table_name: str, file_path: str, batch_size: int, use_transaction: bool) -> Dict[str, Any]:
+        """超快速CSV导入实现 - 直接使用C++引擎"""
+        try:
+            import csv
+            import os
+            
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"文件不存在: {file_path}"}
+            
+            # 读取CSV文件
+            with open(file_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                columns = next(reader)
+                data_rows = [row for row in reader if row]
+            
+            if not data_rows:
+                return {"success": True, "inserted_rows": 0, "failed_rows": 0}
+            
+            # 确保表存在
+            column_defs = []
+            for i, col in enumerate(columns):
+                sample_value = data_rows[0][i] if data_rows and i < len(data_rows[0]) else ""
+                col_type = self._infer_data_type(sample_value)
+                column_defs.append(f"{col} {col_type}")
+            
+            try:
+                create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
+                self.execute(create_sql)
+            except Exception:
+                pass  # 表已存在
+            
+            # 直接使用C++引擎进行批量插入，绕过SQL解析
+            total_inserted = 0
+            failed_rows = 0
+            
+            # 准备所有数据
+            all_rows = []
+            for row in data_rows:
+                if len(row) == len(columns):
+                    all_rows.append(row)
+                else:
+                    failed_rows += 1
+            
+            if all_rows:
+                try:
+                    # 直接调用C++执行引擎的insert_many方法
+                    print(f"🚀 直接调用C++批量插入: {len(all_rows)} 行")
+                    inserted_count = self.hybrid_executor.executor.insert_many(table_name, all_rows)
+                    total_inserted = int(inserted_count)
+                    print(f"✅ C++批量插入成功: {total_inserted} 行")
+                except Exception as e:
+                    print(f"⚠️  C++批量插入失败，回退到事务缓冲模式: {e}")
+                    # 回退到事务缓冲模式
+                    if use_transaction:
+                        self._begin_transaction()
+                    
+                    # 分批处理
+                    for batch_start in range(0, len(all_rows), batch_size):
+                        batch_end = min(batch_start + batch_size, len(all_rows))
+                        batch_data = all_rows[batch_start:batch_end]
+                        
+                        # 使用事务缓冲
+                        for row in batch_data:
+                            try:
+                                values_str = ", ".join([f"'{v}'" for v in row])
+                                columns_str = ", ".join(columns)
+                                insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+                                result = self.execute(insert_sql)
+                                if result.get("status") != "error":
+                                    total_inserted += 1
+                            except Exception:
+                                failed_rows += 1
+                    
+                    if use_transaction:
+                        self._commit_transaction()
+            
+            return {
+                "success": True,
+                "inserted_rows": total_inserted,
+                "failed_rows": failed_rows
+            }
+            
+        except Exception as e:
+            if use_transaction:
+                try:
+                    self._rollback_transaction()
+                except:
+                    pass
+            return {"success": False, "error": str(e)}
+
+    def _fast_import_json(self, table_name: str, file_path: str, batch_size: int, use_transaction: bool) -> Dict[str, Any]:
+        """超快速JSON导入实现 - 直接使用C++引擎"""
+        try:
+            import json
+            import os
+            
+            if not os.path.exists(file_path):
+                return {"success": False, "error": f"文件不存在: {file_path}"}
+            
+            # 读取JSON文件
+            with open(file_path, 'r', encoding='utf-8') as jsonfile:
+                data = json.load(jsonfile)
+            
+            if not data or not isinstance(data, list):
+                return {"success": False, "error": "JSON文件格式错误"}
+            
+            # 获取列名
+            first_row = data[0]
+            if not isinstance(first_row, dict):
+                return {"success": False, "error": "JSON数组元素应为对象"}
+            
+            columns = list(first_row.keys())
+            
+            # 确保表存在
+            column_defs = []
+            for col in columns:
+                sample_value = str(first_row.get(col, ""))
+                col_type = self._infer_data_type(sample_value)
+                column_defs.append(f"{col} {col_type}")
+            
+            try:
+                create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
+                self.execute(create_sql)
+            except Exception:
+                pass  # 表已存在
+            
+            # 直接使用C++引擎进行批量插入，绕过SQL解析
+            total_inserted = 0
+            failed_rows = 0
+            
+            # 准备所有数据
+            all_rows = []
+            for row in data:
+                if isinstance(row, dict):
+                    values = []
+                    for col in columns:
+                        value = row.get(col, "")
+                        values.append(str(value) if value is not None else "")
+                    all_rows.append(values)
+                else:
+                    failed_rows += 1
+            
+            if all_rows:
+                try:
+                    # 直接调用C++执行引擎的insert_many方法
+                    print(f"🚀 直接调用C++批量插入: {len(all_rows)} 行")
+                    inserted_count = self.hybrid_executor.executor.insert_many(table_name, all_rows)
+                    total_inserted = int(inserted_count)
+                    print(f"✅ C++批量插入成功: {total_inserted} 行")
+                except Exception as e:
+                    print(f"⚠️  C++批量插入失败，回退到事务缓冲模式: {e}")
+                    # 回退到事务缓冲模式
+                    if use_transaction:
+                        self._begin_transaction()
+                    
+                    # 分批处理
+                    for batch_start in range(0, len(all_rows), batch_size):
+                        batch_end = min(batch_start + batch_size, len(all_rows))
+                        batch_data = all_rows[batch_start:batch_end]
+                        
+                        # 使用事务缓冲
+                        for row in batch_data:
+                            try:
+                                values_str = ", ".join([f"'{v}'" for v in row])
+                                columns_str = ", ".join(columns)
+                                insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+                                result = self.execute(insert_sql)
+                                if result.get("status") != "error":
+                                    total_inserted += 1
+                            except Exception:
+                                failed_rows += 1
+                    
+                    if use_transaction:
+                        self._commit_transaction()
+            
+            return {
+                "success": True,
+                "inserted_rows": total_inserted,
+                "failed_rows": failed_rows
+            }
+            
+        except Exception as e:
+            if use_transaction:
+                try:
+                    self._rollback_transaction()
+                except:
+                    pass
+            return {"success": False, "error": str(e)}
+
+    def _import_from_csv(self, table_name: str, file_path: str, batch_size: int = 5000) -> bool:
+        """从CSV文件导入数据 - 优化版本，使用批量插入和事务"""
+        try:
+            import csv
+            import os
+            import time
 
             # 检查文件是否存在
             if not os.path.exists(file_path):
                 print(f"❌ 文件不存在: {file_path}")
                 return False
+
+            start_time = time.time()
+            print(f"🚀 开始快速导入CSV文件: {file_path}")
 
             # 读取CSV文件
             with open(file_path, 'r', encoding='utf-8') as csvfile:
@@ -2606,7 +3294,7 @@ class SQLCompilerAdapter:
                 columns = next(reader)
                 print(f"📋 检测到列: {columns}")
 
-                # 读取数据
+                # 读取所有数据到内存
                 data_rows = []
                 for row in reader:
                     if row:  # 跳过空行
@@ -2632,37 +3320,88 @@ class SQLCompilerAdapter:
                 except Exception:
                     print(f"✓ 表 {table_name} 已存在，继续插入数据")
 
+                # 使用事务进行批量插入
+                print("⏳ 开始批量插入数据...")
+                batch_start_time = time.time()
+                
+                # 开始事务
+                self._begin_transaction()
+                
                 # 批量插入数据
-                print("⏳ 正在插入数据...")
-                for i, row in enumerate(data_rows):
-                    if len(row) != len(columns):
-                        print(f"⚠️  第 {i + 2} 行列数不匹配，跳过")
-                        continue
-
-                    # 构建INSERT语句
-                    values_str = ", ".join([f"'{v}'" for v in row])
-                    columns_str = ", ".join(columns)
-                    insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
-
-                    try:
-                        result = self.execute(insert_sql)
-                        if result.get("status") == "error":
-                            print(f"⚠️  插入第 {i + 2} 行失败: {result.get('error')}")
-                    except Exception as e:
-                        print(f"⚠️  插入第 {i + 2} 行失败: {e}")
-
-                print(f"✓ 数据导入完成，共处理 {len(data_rows)} 行")
+                total_inserted = 0
+                failed_rows = []
+                
+                for batch_start in range(0, len(data_rows), batch_size):
+                    batch_end = min(batch_start + batch_size, len(data_rows))
+                    batch_data = data_rows[batch_start:batch_end]
+                    
+                    # 准备批量插入的数据
+                    batch_rows = []
+                    for i, row in enumerate(batch_data):
+                        if len(row) != len(columns):
+                            failed_rows.append(batch_start + i + 2)  # +2 因为跳过了标题行
+                            continue
+                        batch_rows.append(row)
+                    
+                    if batch_rows:
+                        # 使用批量插入
+                        try:
+                            # 直接调用执行引擎的批量插入方法
+                            inserted_count = self.hybrid_executor.insert_many(table_name, batch_rows)
+                            total_inserted += int(inserted_count)
+                            
+                            # 更新进度
+                            progress = (batch_end / len(data_rows)) * 100
+                            print(f"📈 进度: {progress:.1f}% ({batch_end}/{len(data_rows)} 行)")
+                            
+                        except Exception as e:
+                            print(f"⚠️  批量插入失败，回退到逐行插入: {e}")
+                            # 回退到逐行插入
+                            for row in batch_rows:
+                                try:
+                                    values_str = ", ".join([f"'{v}'" for v in row])
+                                    columns_str = ", ".join(columns)
+                                    insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+                                    result = self.execute(insert_sql)
+                                    if result.get("status") != "error":
+                                        total_inserted += 1
+                                except Exception:
+                                    pass
+                
+                # 提交事务
+                commit_result = self._commit_transaction()
+                
+                batch_end_time = time.time()
+                total_time = batch_end_time - start_time
+                
+                print(f"✅ 批量导入完成!")
+                print(f"📊 成功插入: {total_inserted} 行")
+                print(f"⏱️  总耗时: {total_time:.2f} 秒")
+                print(f"🚀 导入速度: {total_inserted/total_time:.0f} 行/秒")
+                
+                if failed_rows:
+                    print(f"⚠️  跳过 {len(failed_rows)} 行（列数不匹配）")
+                
                 return True
 
         except Exception as e:
+            # 如果出错，回滚事务
+            try:
+                self._rollback_transaction()
+            except:
+                pass
             print(f"❌ CSV导入失败: {str(e)}")
             return False
 
-    def _import_from_json(self, table_name: str, file_path: str) -> bool:
+    def _import_from_json(self, table_name: str, file_path: str, batch_size: int = 5000) -> bool:
         """从JSON文件导入数据"""
         try:
             import json
             import os
+            import time
+
+            start_time = time.time()
+            print(f"🚀 开始快速导入JSON文件: {file_path}")
 
             # 检查文件是否存在
             if not os.path.exists(file_path):
@@ -2704,35 +3443,82 @@ class SQLCompilerAdapter:
             except Exception:
                 print(f"✓ 表 {table_name} 已存在，继续插入数据")
 
+            # 使用事务进行批量插入
+            print("⏳ 开始批量插入数据...")
+            batch_start_time = time.time()
+            
+            # 开始事务
+            self._begin_transaction()
+            
             # 批量插入数据
-            print("⏳ 正在插入数据...")
-            for i, row in enumerate(data):
-                if not isinstance(row, dict):
-                    print(f"⚠️  第 {i + 1} 行格式错误，跳过")
-                    continue
-
-                # 构建值列表
-                values = []
-                for col in columns:
-                    value = row.get(col, "")
-                    values.append(str(value) if value is not None else "")
-
-                # 构建INSERT语句
-                values_str = ", ".join([f"'{v}'" for v in values])
-                columns_str = ", ".join(columns)
-                insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
-
-                try:
-                    result = self.execute(insert_sql)
-                    if result.get("status") == "error":
-                        print(f"⚠️  插入第 {i + 1} 行失败: {result.get('error')}")
-                except Exception as e:
-                    print(f"⚠️  插入第 {i + 1} 行失败: {e}")
-
-            print(f"✓ 数据导入完成，共处理 {len(data)} 行")
+            total_inserted = 0
+            failed_rows = []
+            
+            for batch_start in range(0, len(data), batch_size):
+                batch_end = min(batch_start + batch_size, len(data))
+                batch_data = data[batch_start:batch_end]
+                
+                # 准备批量插入的数据
+                batch_rows = []
+                for i, row in enumerate(batch_data):
+                    if not isinstance(row, dict):
+                        failed_rows.append(batch_start + i + 1)
+                        continue
+                    
+                    # 构建行数据
+                    values = []
+                    for col in columns:
+                        value = row.get(col, "")
+                        values.append(str(value) if value is not None else "")
+                    batch_rows.append(values)
+                
+                if batch_rows:
+                    # 使用批量插入
+                    try:
+                        # 直接调用执行引擎的批量插入方法
+                        inserted_count = self.hybrid_executor.insert_many(table_name, batch_rows)
+                        total_inserted += int(inserted_count)
+                        
+                        # 更新进度
+                        progress = (batch_end / len(data)) * 100
+                        print(f"📈 进度: {progress:.1f}% ({batch_end}/{len(data)} 行)")
+                        
+                    except Exception as e:
+                        print(f"⚠️  批量插入失败，回退到逐行插入: {e}")
+                        # 回退到逐行插入
+                        for row in batch_rows:
+                            try:
+                                values_str = ", ".join([f"'{v}'" for v in row])
+                                columns_str = ", ".join(columns)
+                                insert_sql = f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});"
+                                result = self.execute(insert_sql)
+                                if result.get("status") != "error":
+                                    total_inserted += 1
+                            except Exception:
+                                pass
+            
+            # 提交事务
+            commit_result = self._commit_transaction()
+            
+            batch_end_time = time.time()
+            total_time = batch_end_time - start_time
+            
+            print(f"✅ 批量导入完成!")
+            print(f"📊 成功插入: {total_inserted} 行")
+            print(f"⏱️  总耗时: {total_time:.2f} 秒")
+            print(f"🚀 导入速度: {total_inserted/total_time:.0f} 行/秒")
+            
+            if failed_rows:
+                print(f"⚠️  跳过 {len(failed_rows)} 行（格式错误）")
+            
             return True
 
         except Exception as e:
+            # 如果出错，回滚事务
+            try:
+                self._rollback_transaction()
+            except:
+                pass
             print(f"❌ JSON导入失败: {str(e)}")
             return False
 
